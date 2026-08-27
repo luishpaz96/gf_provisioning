@@ -670,7 +670,7 @@ def run_ansible_playbook():
     
 
 def provisional_dhcp():
-    """Escribe las configuraciones provisionales en /etc/dhcp/dhcpd.conf y /etc/dhcp/dhcpd6.conf."""
+    """Escribe las configuraciones provisionales en /etc/dhcp/dhcpd.conf y /etc/dhcp/dhcpd6.conf, reinicia los servicios y espera."""
     if is_step_completed("provisional_dhcp"):
         print("[=] Paso 'provisional_dhcp' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -685,27 +685,18 @@ def provisional_dhcp():
     cmd_dhcpd6 = f"echo '{DHCPD6_CONF_CONTENT}' | sudo tee /etc/dhcp/dhcpd6.conf > /dev/null"
     run_interactive(cmd_dhcpd6)
 
-    print("[✓] Archivos DHCP creados exitosamente en /etc/dhcp/.")
+    print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
+    run_interactive("sudo systemctl restart isc-dhcp-server")
+    run_interactive("sudo systemctl restart isc-dhcp-server6")
+
+    print("[✓] Archivos DHCP creados y servicios reiniciados exitosamente en /etc/dhcp/.")
+    
+    print("[*] Esperando 15 segundos...")
+    time.sleep(15)
+
     mark_step_completed("provisional_dhcp")
 
-def provisional_dhcp():
-    """Escribe las configuraciones provisionales en /etc/dhcp/dhcpd.conf y /etc/dhcp/dhcpd6.conf."""
-    if is_step_completed("provisional_dhcp"):
-        print("[=] Paso 'provisional_dhcp' ya fue ejecutado previamente. Omitiendo...")
-        return
 
-    print("--- PASO 9: Configuracion de Archivos DHCP Provisionales ---")
-
-    print("[*] Creando /etc/dhcp/dhcpd.conf...")
-    cmd_dhcpd = f"echo '{DHCPD_CONF_CONTENT}' | sudo tee /etc/dhcp/dhcpd.conf > /dev/null"
-    run_interactive(cmd_dhcpd)
-
-    print("[*] Creando /etc/dhcp/dhcpd6.conf...")
-    cmd_dhcpd6 = f"echo '{DHCPD6_CONF_CONTENT}' | sudo tee /etc/dhcp/dhcpd6.conf > /dev/null"
-    run_interactive(cmd_dhcpd6)
-
-    print("[✓] Archivos DHCP creados exitosamente en /etc/dhcp/.")
-    mark_step_completed("provisional_dhcp")
     
 def run_final_abmx_config():
     """Paso 10: Run final ABMX server configuration via git-mirror."""
