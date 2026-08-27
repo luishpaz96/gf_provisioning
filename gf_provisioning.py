@@ -5,11 +5,64 @@ import sys
 import subprocess
 import re
 import pexpect
-import sys
 import time
 import select
+import atexit
 
+# ==============================================================================
+# CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
+# ==============================================================================
 START_TIME = time.time()
+LOG_FILE_PATH = "provisioning_execution.log"
+
+class DualLogger:
+    """Duplica la salida estándar (stdout) y de error (stderr) hacia la terminal y un archivo de log."""
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.logfile = open(filepath, "a", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.logfile.write(message)
+        self.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.logfile.flush()
+
+    def close(self):
+        if self.logfile and not self.logfile.closed:
+            self.logfile.flush()
+            os.fsync(self.logfile.fileno())  # Fuerza la escritura física en disco
+            self.logfile.close()
+
+# Redireccionamos stdout y stderr desde el inicio
+logger_instance = DualLogger(LOG_FILE_PATH)
+sys.stdout = logger_instance
+sys.stderr = logger_instance
+
+def log_final_summary():
+    """Calcula el tiempo transcurrido y escribe el resumen final en el log antes de salir o reiniciar."""
+    elapsed_seconds = int(time.time() - START_TIME)
+    minutes, seconds = divmod(elapsed_seconds, 60)
+    time_str = f"{minutes} min {seconds} s" if minutes > 0 else f"{seconds} s"
+
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    summary = (
+        f"\n======================================================================\n"
+        f" [LOG CLOSED] Fecha: {timestamp}\n"
+        f" [LOG CLOSED] Tiempo total transcurrido: {time_str}\n"
+        f"======================================================================\n"
+    )
+    print(summary)
+    logger_instance.close()
+
+# Garantiza que el resumen y cierre de archivo se ejecuten siempre (falle o termine normal)
+atexit.register(log_final_summary)
+
+# ==============================================================================
+# VARIABLES GLOBALES
+# ==============================================================================
 STATE_FILE = "provisioning_state.json"
 SUDO_PASSWORD = "55eed35fba"
 VAULT_PASSWORD = r"/!X6i8n0+cxK$v3m4tQ-"
@@ -30,13 +83,6 @@ subnet 10.0.0.0 netmask 255.255.0.0 {
   option broadcast-address 10.0.255.255;
   next-server 10.0.0.254;
 
-  # use the http link for ovss image
-  # filename "http://10.0.0.254:8001/izumi/ipxe.cfg";
-
-  # use the pxelinux loader for nodeOs image using tftp
-  # filename "pxelinux.0";
-
-  # use pxelinux loader for nodeOs image using httpfileserverd
   filename "http://10.0.0.254:8001/pxelinux.0";
 }
 host izumi-1 { hardware ethernet 98:98:FB:CA:F0:E5; fixed-address 10.0.0.1; }
@@ -57,9 +103,6 @@ host izumi-15 { hardware ethernet 98:98:FB:CA:E5:F5; fixed-address 10.0.0.15; }
 host izumi-16 { hardware ethernet 98:98:FB:C5:33:3D; fixed-address 10.0.0.16; }
 host rj45-switch { hardware ethernet 00:00:00:00:00:00; fixed-address 10.0.0.249; }
 
-# NOTE #
-# *** DO NOT PUT MANUAL ENTRIES INSIDE THIS ANSIBLE BLOCK!!! ***
-# All manual entries should be outside the block to be preserved!
 # END ANSIBLE MANAGED BLOCK
 host zpe { hardware ethernet e4:1a:2c:02:c3:0c; fixed-address 10.0.0.253; }
 host iboot { hardware ethernet 00:0D:AD:04:92:28; fixed-address 10.0.0.250; }
@@ -84,7 +127,6 @@ range6 fd00::11 fd00::FF;
 option dhcp6.bootfile-url "http://[fd00::9]:8001/diorite/ipxe.cfg";
 log(info, "DHCPv6 - Found other ipv6 client...");
 
-# To assign a fixed address to diorite.
 host diorite-1 {
 host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:F0:E2;
 log(info, "DHCPv6 - Found Diorite-1 client...");
@@ -169,10 +211,8 @@ fixed-address6 fd00::1F;
 # END ANSIBLE MANAGED BLOCK"""
 
 def print_ascii_fail():
-    """Imprime un letrero FAIL gigante en rojo en la terminal."""
     red_code = "\033[91m\033[1m"
     reset_code = "\033[0m"
-    
     banner = r"""
 ================================================================================
 
@@ -200,13 +240,11 @@ def print_ascii_fail():
     print(f"{red_code}[!] Por favor, revisa el log superior para hacer debug.{reset_code}\n")
 
 def fix_state_file_permissions():
-    """Garantiza que provisioning_state.json sea propiedad de testusr si existe."""
     if os.path.exists(STATE_FILE):
         sudo_user = os.environ.get('SUDO_USER', 'testusr')
         subprocess.run(f"sudo chown {sudo_user}:{sudo_user} {STATE_FILE}", shell=True, stderr=subprocess.DEVNULL)
 
 def load_state():
-    """Carga el estado de ejecucion desde el archivo JSON."""
     fix_state_file_permissions()
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
@@ -214,18 +252,15 @@ def load_state():
     return {"flags": {}, "config": {}}
 
 def save_state(state):
-    """Guarda el estado actual en el archivo JSON."""
     fix_state_file_permissions()
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=4)
 
 def is_step_completed(step_name):
-    """Verifica si un paso ya fue completado exitosamente."""
     state = load_state()
     return state.get("flags", {}).get(step_name, False)
 
 def mark_step_completed(step_name, extra_config=None):
-    """Marca un paso como completado y actualiza configuraciones si aplica."""
     state = load_state()
     state["flags"][step_name] = True
     if extra_config:
@@ -234,7 +269,6 @@ def mark_step_completed(step_name, extra_config=None):
     print(f"[✓] Paso '{step_name}' completado y registrado en {STATE_FILE}.")
 
 def run_command(cmd, check=True):
-    """Ejecuta un comando estandar en shell con salida en tiempo real."""
     print(f"[CMD] {cmd}")
     res = subprocess.run(cmd, shell=True)
     if check and res.returncode != 0:
@@ -242,7 +276,6 @@ def run_command(cmd, check=True):
     return res.returncode
 
 def run_interactive(cmd, timeout=3600):
-    """Ejecuta un comando interactivo interceptando automáticamente cualquier prompt de contraseña de sudo."""
     print(f"[CMD Interactive] {cmd}")
     child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=timeout)
     child.logfile_read = sys.stdout
@@ -269,7 +302,6 @@ def run_interactive(cmd, timeout=3600):
     return child.exitstatus
 
 def set_ID():
-    """Pide el numero de rack, calcula IP y Hostname, y guarda la configuracion base."""
     if is_step_completed("set_ID"):
         print("[=] Paso 'set_ID' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -302,7 +334,6 @@ def set_ID():
     mark_step_completed("set_ID", config_data)
 
 def set_network():
-    """Configura la red via nmcli, actualiza apt e instala paquetes base con ssh-keygen y pythonlibs."""
     if is_step_completed("set_network"):
         print("[=] Paso 'set_network' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -314,7 +345,6 @@ def set_network():
     if not ip_address:
         raise RuntimeError("No se encontro la IP en la configuracion. Asegurate de correr 'set_ID' primero.")
 
-    # Nota: Si la conexión 'SFC' ya existe, nmcli fallará a menos que la modifiques o la borres antes.
     nmcli_cmd = (
         f'sudo nmcli con add con-name "SFC" ifname eno1 type ethernet '
         f'ipv4.method manual ipv4.addresses {ip_address}/24 gw4 172.24.125.1 ipv4.dns 8.8.8.8'
@@ -329,7 +359,6 @@ def set_network():
     run_interactive("sudo apt update")
     run_interactive("sudo apt-get update")
 
-    # El flag -y ya viene incluido aquí para evitar prompts en apt
     pkgs_cmd = "sudo apt install openssh-server net-tools git sssd sssd-tools libpam-sss libnss-sss python3-pip -y"
     run_interactive(pkgs_cmd)
 
@@ -348,11 +377,9 @@ def set_network():
     else:
         print(f"[=] La llave SSH ya existe en {ssh_key_path}. Omitiendo ssh-keygen...")
 
-    # -> ¡IMPORTANTE!: Registramos el paso como completado en el JSON
     mark_step_completed("set_network")
 
 def run_scp_from_mirror(remote_path, local_destination):
-    """Copia archivos desde el Git Mirror (172.24.125.2) hacia la maquina local usando pexpect."""
     mirror_ip = "172.24.125.2"
     mirror_pass = "google123"
     cmd = f"scp testusr@{mirror_ip}:{remote_path} {local_destination}"
@@ -383,7 +410,6 @@ def run_scp_from_mirror(remote_path, local_destination):
         raise RuntimeError(f"Error transfiriendo {remote_path} desde el Git Mirror.")
 
 def gitconfig_cookie():
-    """Descarga gitconfig/gitcookies desde el mirror, clona repo de seguridad y transfiere security-read-flg.json."""
     if is_step_completed("gitconfig_cookie"):
         print("[=] Paso 'gitconfig_cookie' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -410,11 +436,9 @@ def gitconfig_cookie():
         print("[=] El repositorio 'security-hardened-image' ya existe. Omitiendo clonacion...")
 
     run_scp_from_mirror("security-read-flg.json", f"{user_home}/")
-
     mark_step_completed("gitconfig_cookie")
 
 def flex_tag():
-    """Modifica el script setup-patch.sh para asignar el tag de Flex Guadalajara, comenta la preparacion DVC e instala la llave de gpg."""
     if is_step_completed("flex_tag"):
         print("[=] Paso 'flex_tag' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -456,7 +480,6 @@ def flex_tag():
     mark_step_completed("flex_tag")
 
 def run_security_patch():
-    """Ejecuta setup-patch.sh como testusr usando run_interactive para responder automáticamente."""
     if is_step_completed("run_security_patch"):
         print("[=] Paso 'run_security_patch' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -479,7 +502,6 @@ def run_security_patch():
     mark_step_completed("run_security_patch")
 
 def validate_and_lego_setup():
-    """Valida parches de seguridad, instala repositorio universe/pip libs, clona lego-infra e instala ansible-clean de forma interactiva."""
     if is_step_completed("validate_and_lego_setup"):
         print("[=] Paso 'validate_and_lego_setup' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -516,7 +538,6 @@ def validate_and_lego_setup():
     mark_step_completed("validate_and_lego_setup")
 
 def setup_nomachine_yaml():
-    """Lee/guarda la URL de NoMachine en el JSON de estado y actualiza install-nomachine.yaml."""
     if is_step_completed("setup_nomachine_yaml"):
         print("[=] Paso 'setup_nomachine_yaml' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -560,7 +581,6 @@ def setup_nomachine_yaml():
     mark_step_completed("setup_nomachine_yaml", {"nomachine_url": nomachine_url})
 
 def run_ansible_playbook():
-    """Ejecuta el playbook, responde prompts e inspecciona el PLAY RECAP para asegurar failed=0."""
     if is_step_completed("run_ansible_playbook"):
         print("[=] Paso 'run_ansible_playbook' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -662,15 +682,10 @@ def run_ansible_playbook():
     run_interactive(downgrade_cmd)
     
     mark_step_completed("run_ansible_playbook")
-
-    # Pausa de 15 segundos solicitada al terminar exitosamente el paso
     print("[*] Esperando 15 segundos antes de finalizar el paso...")
     time.sleep(15)
 
-    
-
 def provisional_dhcp():
-    """Escribe las configuraciones provisionales en /etc/dhcp/dhcpd.conf y /etc/dhcp/dhcpd6.conf, reinicia los servicios y espera."""
     if is_step_completed("provisional_dhcp"):
         print("[=] Paso 'provisional_dhcp' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -690,16 +705,12 @@ def provisional_dhcp():
     run_interactive("sudo systemctl restart isc-dhcp-server6")
 
     print("[✓] Archivos DHCP creados y servicios reiniciados exitosamente en /etc/dhcp/.")
-    
     print("[*] Esperando 15 segundos...")
     time.sleep(15)
 
     mark_step_completed("provisional_dhcp")
 
-
-    
 def run_final_abmx_config():
-    """Paso 10: Run final ABMX server configuration via git-mirror."""
     if is_step_completed("run_final_abmx_config"):
         print("[=] Paso 'run_final_abmx_config' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -713,7 +724,6 @@ def run_final_abmx_config():
 
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
 
-    # 1. Limpiar archivos dañados e instalar Goss de forma limpia
     print("[*] Limpiando archivos goss anteriores...")
     run_command("rm -f goss*", check=False)
 
@@ -721,7 +731,6 @@ def run_final_abmx_config():
     goss_install_cmd = "curl -fsSL https://goss.rocks/install | sudo sh"
     run_interactive(goss_install_cmd)
 
-    # Corregir permisos de ~/.local para evitar fallos de propiedad (root -> testusr)
     print("[*] Corrigiendo ownership de /home/testusr/.local...")
     fix_local_dir_cmd = f"sudo chown -R {sudo_user}:{sudo_user} /home/{sudo_user}/.local"
     run_interactive(fix_local_dir_cmd)
@@ -729,7 +738,6 @@ def run_final_abmx_config():
     mirror_ip = "172.24.125.2"
     mirror_pass = "google123"
 
-    # 2. Copiar ssh key al IST test server desde el Git-Mirror
     ssh_copy_cmd = f"ssh-copy-id -i ~/.ssh/id_rsa.pub {sudo_user}@{ip_address}"
     cmd_remote_copy = f"ssh {sudo_user}@{mirror_ip} '{ssh_copy_cmd}'"
     print(f"[CMD Interactive] {cmd_remote_copy}")
@@ -758,7 +766,6 @@ def run_final_abmx_config():
 
     child_copy.close()
 
-    # 3. Correr script de ansible en el git-mirror interactivamente (timeout ilimitado)
     ansible_cmd = (
         f"cd ~/amp-ansible && ansible-playbook -i {ip_address}, repo_updater/configure-fish-station.yaml "
         f"-vv --ask-become-pass --ask-pass --flush-cache --vault-id @prompt"
@@ -795,7 +802,6 @@ def run_final_abmx_config():
             child_ansible.sendline(VAULT_PASSWORD)
         elif idx == 8:
             play_recap_detected = True
-            # En cuanto se detecta el PLAY RECAP, enviamos el comando 'exit' para cerrar SSH
             child_ansible.sendline("exit")
         elif idx == 9:
             break
@@ -807,44 +813,34 @@ def run_final_abmx_config():
         raise RuntimeError(f"Error en ejecucion de ansible-playbook via git-mirror (Exit code: {child_ansible.exitstatus})")
 
     mark_step_completed("run_final_abmx_config")
-    
-    # Pausa de 15 segundos solicitada al terminar exitosamente el paso
     print("[*] Esperando 15 segundos antes de finalizar el paso...")
     time.sleep(15)
-    
+
 def create_networkmanager_symlink():
-    """Paso 11: Crear symlink para NetworkManager e instalar paquetes requeridos."""
     if is_step_completed("create_networkmanager_symlink"):
         print("[=] Paso 'create_networkmanager_symlink' ya fue ejecutado previamente. Omitiendo...")
         return
 
     print("--- PASO 11: Create NetworkManager Symlink & Install Required Packages ---")
-
     target_dir = "/usr/lib/systemd/system"
 
-    # 1. Listar archivos que coincidan con *etwork* directamente en el directorio
     print(f"[*] Listando archivos *etwork* en {target_dir}:")
     run_command(f"ls -l {target_dir}/*etwork*", check=False)
 
-    # 2. Actualizar repos e instalar libsss-sudo y gnome-control-center
     print("[*] Actualizando lista de paquetes e instalando libsss-sudo y gnome-control-center...")
     apt_cmd = "sudo apt update && sudo apt install -y libsss-sudo gnome-control-center"
     run_interactive(apt_cmd)
 
-    # 3. Crear enlace simbólico de NetworkManager.service a network-manager.service
     print("[*] Creando symlink para network-manager.service...")
     symlink_cmd = f"sudo ln -sf {target_dir}/NetworkManager.service {target_dir}/network-manager.service"
     run_interactive(symlink_cmd)
 
-    # 4. Recargar daemon de systemd
     print("[*] Recargando daemon de systemd...")
     run_interactive("sudo systemctl daemon-reload")
 
     mark_step_completed("create_networkmanager_symlink")
-    
 
 def network_plan():
-    """Paso 12: Extraer MACs de ens4f0/ens4f1, actualizar netplan y aplicar cambios."""
     if is_step_completed("network_plan"):
         print("[=] Paso 'network_plan' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -854,7 +850,6 @@ def network_plan():
     mac_f0 = None
     mac_f1 = None
 
-    # 1. Intento por lectura directa de archivos en sysfs (lo más rápido y directo)
     try:
         path_f0 = '/sys/class/net/ens4f0/address'
         path_f1 = '/sys/class/net/ens4f1/address'
@@ -868,11 +863,9 @@ def network_plan():
     except Exception as e:
         print(f"[!] Warning leyendo sysfs: {e}")
 
-    # 2. Fallback parseando la salida de ifconfig procesada correctamente a str
     if not mac_f0 or not mac_f1:
         raw_output = run_command("ifconfig", check=False)
         
-        # Garantizar que la salida sea una cadena de texto (str) sin importar la firma de run_command
         if isinstance(raw_output, (tuple, list)):
             ifconfig_str = str(raw_output[0])
         elif isinstance(raw_output, bytes):
@@ -897,7 +890,6 @@ def network_plan():
     print(f"[+] MAC ens4f0: {mac_f0}")
     print(f"[+] MAC ens4f1: {mac_f1}")
 
-    # 3. Guardar en el diccionario de estado del JSON
     state = load_state()
     if "interfaces" not in state:
         state["interfaces"] = {}
@@ -906,7 +898,6 @@ def network_plan():
     state["interfaces"]["ens4f1"] = mac_f1
     save_state(state)
 
-    # 4. Generar el YAML exacto requerido
     netplan_content = f"""# Let NetworkManager manage all devices on this system
 network:
   version: 2
@@ -924,7 +915,6 @@ network:
   renderer: NetworkManager
 """
 
-    # 5. Sobrescribir /etc/netplan/01-network-manager-all.yaml
     netplan_path = "/etc/netplan/01-network-manager-all.yaml"
     temp_netplan = "/tmp/01-network-manager-all.yaml"
 
@@ -935,72 +925,13 @@ network:
     run_interactive(f"sudo mv {temp_netplan} {netplan_path}")
     run_interactive(f"sudo chmod 600 {netplan_path}")
 
-    # 6. Aplicar cambios
     print("[*] Aplicando Netplan...")
     run_interactive("sudo netplan try --timeout 5")
     run_interactive("sudo netplan apply")
 
     mark_step_completed("network_plan")
-    
-def end_config_reboot():
-    """Paso final: Muestra resumen de ejecución y reinicia el sistema tras confirmación o timeout."""
-    if is_step_completed("end_config_reboot"):
-        print("[=] Paso 'end_config_reboot' ya fue ejecutado previamente. Omitiendo...")
-        return
 
-    # Códigos ANSI para color verde y reseteo
-    GREEN = "\033[92m"
-    RESET = "\033[0m"
-
-    # Calculamos el tiempo total de ejecución
-    elapsed_seconds = int(time.time() - START_TIME)
-    minutes, seconds = divmod(elapsed_seconds, 60)
-    time_str = f"{minutes} min {seconds} s" if minutes > 0 else f"{seconds} s"
-
-    # Cargar los pasos ejecutados desde el JSON de estado
-    state = load_state()
-    completed_steps = state.get("completed_steps", [])
-
-    # 1. Imprimir resumen en color verde
-    print(f"\n{GREEN}{'='*60}")
-    print("           CONFIGURACION TERMINADA EXITOSAMENTE           ")
-    print(f"{'='*60}{RESET}")
-    
-    print(f"{GREEN}[+] Tiempo total de ejecucion: {time_str}{RESET}")
-    print(f"{GREEN}[+] Pasos completados ({len(completed_steps)}):{RESET}")
-    for step in completed_steps:
-        print(f"{GREEN}    - {step}{RESET}")
-    print(f"{GREEN}    - end_config_reboot (En proceso...){RESET}")
-    print(f"{GREEN}{'='*60}\n{RESET}")
-
-    # 2. Guardar el estado final en el JSON antes del reinicio
-    mark_step_completed("end_config_reboot")
-
-    # 3. Contador de 60 segundos o espera a la tecla Enter
-    timeout = 600
-    print(f"El sistema se reiniciara automaticamente en {timeout} segundos.")
-    print("Presiona [ENTER] para reiniciar inmediatamente...")
-
-    start_wait = time.time()
-    reboot_now = False
-
-    while (time.time() - start_wait) < timeout:
-        remaining = int(timeout - (time.time() - start_wait))
-        sys.stdout.write(f"\rReiniciando en {remaining}s... (Presiona ENTER para adelantar): ")
-        sys.stdout.flush()
-
-        # Detección de input sin bloquear la ejecución (Linux/Unix)
-        rlist, _, _ = select.select([sys.stdin], [], [], 1.0)
-        if rlist:
-            sys.stdin.readline()
-            reboot_now = True
-            break
-
-    print("\n\n[*] Iniciando reinicio del sistema...")
-    run_interactive("sudo reboot")
-    
 def download_python_tools():
-    """Descarga por SCP las herramientas necesarias desde el servidor remoto 172.24.125.174."""
     if is_step_completed("download_python_tools"):
         print("[=] Paso 'download_python_tools' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -1009,9 +940,8 @@ def download_python_tools():
     
     remote_host = "172.24.125.174"
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    remote_user = sudo_user  # Asumimos el mismo usuario remoto, ajústalo si es diferente
+    remote_user = sudo_user
     
-    # Archivos a descargar
     files_to_download = [
         "dhcpd.py",
         "UUT_test_case.py",
@@ -1020,11 +950,9 @@ def download_python_tools():
         "U22Tocinos"
     ]
     
-    # Directorio de destino local
-    destination_dir = f"."
+    destination_dir = "."
     
     for filename in files_to_download:
-        # Usando la ruta exacta /home/testusr/(nombre del archivo)
         remote_path = f"{remote_user}@{remote_host}:/home/{remote_user}/{filename}"
         cmd = f"scp {remote_path} {destination_dir}/"
         
@@ -1065,13 +993,9 @@ def download_python_tools():
             raise RuntimeError(f"Error descargando {filename} por SCP (Exit code: {child.exitstatus})")
 
     print("[✓] Todas las herramientas fueron descargadas exitosamente.")
-    
- 
-
     mark_step_completed("download_python_tools")
-    
+
 def fix_chrome():
-    """Elimina por completo cualquier rastro de Google Chrome y lo reinstala limpiamente con comandos."""
     if is_step_completed("fix_chrome"):
         print("[=] Paso 'fix_chrome' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -1107,8 +1031,52 @@ def fix_chrome():
     print("[✓] Google Chrome ha sido eliminado y reinstalado exitosamente.")
     mark_step_completed("fix_chrome")
 
+def end_config_reboot():
+    if is_step_completed("end_config_reboot"):
+        print("[=] Paso 'end_config_reboot' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    GREEN = "\033[92m"
+    RESET = "\033[0m"
+
+    state = load_state()
+    flags = state.get("flags", {})
+    completed_steps = [k for k, v in flags.items() if v]
+
+    print(f"\n{GREEN}{'='*60}")
+    print("           CONFIGURACION TERMINADA EXITOSAMENTE           ")
+    print(f"{'='*60}{RESET}")
+    
+    print(f"{GREEN}[+] Pasos completados ({len(completed_steps)}):{RESET}")
+    for step in completed_steps:
+        print(f"{GREEN}    - {step}{RESET}")
+    print(f"{GREEN}    - end_config_reboot (En proceso...){RESET}")
+    print(f"{GREEN}{'='*60}\n{RESET}")
+
+    mark_step_completed("end_config_reboot")
+
+    timeout = 60
+    print(f"El sistema se reiniciara automaticamente en {timeout} segundos.")
+    print("Presiona [ENTER] para reiniciar inmediatamente...")
+
+    start_wait = time.time()
+    while (time.time() - start_wait) < timeout:
+        remaining = int(timeout - (time.time() - start_wait))
+        sys.stdout.write(f"\rReiniciando en {remaining}s... (Presiona ENTER para adelantar): ")
+        sys.stdout.flush()
+
+        rlist, _, _ = select.select([sys.stdin], [], [], 1.0)
+        if rlist:
+            sys.stdin.readline()
+            break
+
+    print("\n\n[*] Forzando cierre del log a disco antes del reboot...")
+    log_final_summary()
+
+    print("[*] Iniciando reinicio del sistema...")
+    run_interactive("sudo reboot")
+
 if __name__ == "__main__":
-	
     set_ID()
     set_network()
     gitconfig_cookie()
@@ -1122,5 +1090,5 @@ if __name__ == "__main__":
     create_networkmanager_symlink()
     network_plan()
     download_python_tools()
-    end_config_reboot()
     fix_chrome()
+    end_config_reboot()
