@@ -8,6 +8,7 @@ import pexpect
 import time
 import select
 import atexit
+import uuid
 
 # ==============================================================================
 # CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
@@ -1401,6 +1402,199 @@ def zpe_config():
 
     print("[✓] Configuracion del ZPE completada exitosamente.")
 
+def _scp_download(remote_user, remote_host, remote_path, destination="."):
+    """Descarga (recursivamente) 'remote_path' desde 'remote_user@remote_host' hacia
+    'destination' via scp, manejando el prompt de huella SSH y de contrasena
+    (se usa SUDO_PASSWORD, siguiendo la misma convencion que run_scp_from_mirror
+    y download_python_tools)."""
+    cmd = f"scp -r {remote_user}@{remote_host}:{remote_path} {destination}"
+    print(f"[CMD Interactive] {cmd}")
+
+    child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=None)
+    child.logfile_read = sys.stdout
+
+    while True:
+        idx = child.expect([
+            r"Are you sure you want to continue connecting",
+            r"[pP]assword:",
+            pexpect.EOF,
+            pexpect.TIMEOUT
+        ], timeout=600)
+
+        if idx == 0:
+            child.sendline("yes")
+        elif idx == 1:
+            child.sendline(SUDO_PASSWORD)
+        elif idx == 2:
+            break
+        elif idx == 3:
+            child.close(force=True)
+            print_ascii_fail()
+            raise RuntimeError(f"Timeout copiando '{remote_path}' desde {remote_host}.")
+
+    child.close()
+    if child.exitstatus != 0:
+        print_ascii_fail()
+        raise RuntimeError(
+            f"Error copiando '{remote_path}' desde {remote_host} (Exit code: {child.exitstatus})."
+        )
+
+def _run_shell_sequence(commands, timeout=600):
+    """Ejecuta 'commands' UNO POR UNO (sin encadenarlos con '&&' en una sola linea)
+    dentro de una UNICA sesion de bash persistente, para que efectos como 'cd'
+    se mantengan de un comando al siguiente, igual que si se tecleasen a mano
+    en una terminal. Maneja automaticamente cualquier prompt de 'sudo' que
+    aparezca en medio de la secuencia."""
+    print("[*] Ejecutando secuencia de comandos (sesion de shell persistente):")
+    for c in commands:
+        print(f"    $ {c}")
+
+    child = pexpect.spawn("bash", encoding="utf-8", timeout=timeout)
+    child.logfile_read = sys.stdout
+
+    try:
+        for cmd in commands:
+            marker = f"__CMDDONE_{uuid.uuid4().hex}__"
+            # Se envia el comando y el marcador de finalizacion en una sola
+            # linea compuesta (una unica llamada a sendline). Si se enviaran
+            # en dos sendline() separados, y 'cmd' dispara un prompt de sudo,
+            # el segundo sendline podria "colarse" como si fuera la respuesta
+            # al prompt de contrasena, ya que sudo lee directo de la terminal.
+            child.sendline(f"{cmd}; echo {marker}$?")
+
+            exit_code = None
+            while exit_code is None:
+                idx = child.expect([
+                    rf"{marker}(\d+)",
+                    r"\[sudo\] password for .*:?",
+                    r"[pP]assword:",
+                    pexpect.TIMEOUT,
+                    pexpect.EOF
+                ], timeout=timeout)
+
+                if idx == 0:
+                    exit_code = int(child.match.group(1))
+                elif idx in (1, 2):
+                    child.sendline(SUDO_PASSWORD)
+                else:
+                    print_ascii_fail()
+                    raise RuntimeError(f"Timeout/EOF ejecutando '{cmd}' en la secuencia de shell.")
+
+            if exit_code != 0:
+                print_ascii_fail()
+                raise RuntimeError(f"El comando '{cmd}' fallo con codigo de salida {exit_code}.")
+    finally:
+        try:
+            child.sendline("exit")
+            child.close(force=True)
+        except Exception:
+            pass
+
+def vrmu_util_config():
+    if is_step_completed("vrmu_util_config"):
+        print("[=] Paso 'vrmu_util_config' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Descarga y configuracion de VRMU Util / Viperfish-DVC ---")
+
+    remote_host = "172.24.125.172"
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    remote_user = sudo_user
+    home_dir = f"/home/{sudo_user}"
+
+    # --- PASO 1: Descargar por SCP los directorios/archivos necesarios ---
+    items_to_download = [
+        "viperfish-dvc",
+        "vrmu_util",
+        "ledare_1_*",
+        "FWContainer_EN_3_AP_00_02_00_09.bin",
+    ]
+
+    for item in items_to_download:
+        remote_path = f"/home/{remote_user}/{item}"
+        print(f"[*] Descargando '{item}' desde {remote_host}...")
+        _scp_download(remote_user, remote_host, remote_path, destination=".")
+
+    # --- PASO 2: Copiar la imagen 'tross' de viperfish-dvc/vin-sweep a /tftpboot/ ---
+    # Comandos enviados por separado (no encadenados con '&&'), tal como en el runbook.
+    # NOTA: se agrega 'sudo' al 'cp' (no presente en el runbook original) porque
+    # /tftpboot/ es un directorio de sistema que normalmente requiere permisos
+    # elevados, siguiendo la misma convencion usada en el resto del script
+    # para escrituras fuera del home del usuario.
+    print("[*] Copiando imagen 'tross' a /tftpboot/...")
+    _run_shell_sequence([
+        "cd viperfish-dvc/vin-sweep/",
+        "sudo cp -r tross /tftpboot/",
+    ])
+
+    # --- PASO 3: Copiar vrmu_util al home del usuario y darle permisos de ejecucion ---
+    # Comandos enviados por separado (no encadenados con '&&'), tal como en el runbook.
+    print("[*] Copiando vrmu_util al home y asignando permisos...")
+
+    downloaded_vrmu_path = os.path.abspath("vrmu_util")
+    home_vrmu_path = os.path.join(home_dir, "vrmu_util")
+
+    if (os.path.exists(downloaded_vrmu_path) and os.path.exists(home_vrmu_path)
+            and os.path.samefile(downloaded_vrmu_path, home_vrmu_path)):
+        # El script ya se ejecuto desde el home del usuario, por lo que 'vrmu_util'
+        # descargado en el PASO 1 ya es el mismo archivo que '~/vrmu_util'.
+        # 'cp' fallaria con "same file", asi que solo aplicamos el chmod.
+        print("[=] 'vrmu_util' ya se encuentra en el home del usuario. Omitiendo la copia, solo se ajustan permisos...")
+        _run_shell_sequence([
+            "cd",
+            "chmod 777 vrmu_util",
+        ])
+    else:
+        _run_shell_sequence([
+            "cd",
+            "cp vrmu_util ~",
+            "chmod 777 vrmu_util",
+        ])
+
+    print("[✓] Configuracion de VRMU Util completada exitosamente.")
+    mark_step_completed("vrmu_util_config")
+
+def tross_capture_mac():
+    if is_step_completed("tross_capture_mac"):
+        print("[=] Paso 'tross_capture_mac' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Captura de la MAC del Tross ---")
+
+    _print_yellow_banner("Porfavor introduzca la direccion MAC del Tross")
+    mac_input = input("MAC del Tross: ").strip()
+
+    # Normalizamos: nos quedamos solo con los caracteres hexadecimales,
+    # sin importar si el usuario la escribio con ':', '-', espacios o sin
+    # ningun separador, y luego reconstruimos el formato con ':' cada 2 caracteres.
+    clean_mac = re.sub(r'[^0-9a-fA-F]', '', mac_input)
+
+    if len(clean_mac) != 12:
+        print_ascii_fail()
+        raise ValueError(
+            f"La MAC ingresada no es valida (se esperaban 12 caracteres hexadecimales, "
+            f"se obtuvieron {len(clean_mac)}): '{mac_input}'"
+        )
+
+    tross_mac = ":".join(clean_mac[i:i + 2] for i in range(0, 12, 2)).lower()
+    print(f"[+] MAC normalizada del Tross: {tross_mac}")
+
+    mark_step_completed("tross_capture_mac", {"tross_mac": tross_mac})
+
+    # --- Actualizar /etc/dhcp/dhcpd.conf con la MAC real del Tross ---
+    print("[*] Actualizando /etc/dhcp/dhcpd.conf con la MAC real del Tross...")
+    new_line = f"host tross {{ hardware ethernet {tross_mac}; fixed-address 10.0.0.251; }}"
+    sed_cmd = (
+        "sudo sed -i '/host tross { hardware ethernet/c\\"
+        f"{new_line}' /etc/dhcp/dhcpd.conf"
+    )
+    run_interactive(sed_cmd)
+
+    print("[*] Verificando que la MAC se haya aplicado correctamente...")
+    run_interactive(f"sudo grep -q '{tross_mac}' /etc/dhcp/dhcpd.conf")
+
+    print("[✓] MAC del Tross capturada y aplicada exitosamente.")
+
 def download_python_tools():
     if is_step_completed("download_python_tools"):
         print("[=] Paso 'download_python_tools' ya fue ejecutado previamente. Omitiendo...")
@@ -1561,6 +1755,8 @@ if __name__ == "__main__":
     network_plan()
     juniper_config()
     zpe_config()
+    vrmu_util_config()
+    tross_capture_mac()
     download_python_tools()
     fix_chrome()
     end_config_reboot()
