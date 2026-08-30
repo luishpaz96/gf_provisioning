@@ -13,7 +13,7 @@ import atexit
 # CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
 # ==============================================================================
 START_TIME = time.time()
-LOG_FILE_PATH = "provisioning_execution.log"
+LOG_FILE_PATH = f"provisioning_execution_{time.strftime('%Y%m%d_%H%M%S')}.log"
 
 class DualLogger:
     """Duplica la salida estándar (stdout) y de error (stderr) hacia la terminal y un archivo de log."""
@@ -931,6 +931,476 @@ network:
 
     mark_step_completed("network_plan")
 
+def _print_yellow_banner(message):
+    """Imprime un mensaje resaltado en amarillo, con borde, para instrucciones manuales."""
+    YELLOW = "\033[93m\033[1m"
+    RESET = "\033[0m"
+    border = "=" * 80
+    print(f"\n{YELLOW}{border}")
+    print(f"[!] {message}")
+    print(f"{border}{RESET}\n")
+
+def _try_minicom_connect(device, baud):
+    """Intenta abrir una sesion minicom sobre 'device' a la velocidad 'baud'.
+    Devuelve el objeto pexpect.spawn conectado si tuvo exito, o None si fallo."""
+    cmd = f"sudo minicom -D {device} -b {baud}"
+    print(f"[CMD Interactive] {cmd}")
+    c = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=30)
+    c.logfile_read = sys.stdout
+
+    idx = c.expect([
+        r"\[sudo\] password for .*:?",
+        r"[pP]assword:",
+        r"Cannot open|No such file or directory|Device or resource busy|does not exist",
+        r"Welcome to minicom|Press CTRL-A Z for help",
+        pexpect.EOF,
+        pexpect.TIMEOUT
+    ], timeout=20)
+
+    if idx in (0, 1):
+        c.sendline(SUDO_PASSWORD)
+        idx2 = c.expect([
+            r"Cannot open|No such file or directory|Device or resource busy|does not exist",
+            r"Welcome to minicom|Press CTRL-A Z for help",
+            pexpect.EOF,
+            pexpect.TIMEOUT
+        ], timeout=20)
+        if idx2 == 1:
+            return c
+        c.close(force=True)
+        return None
+    elif idx == 3:
+        return c
+    else:
+        c.close(force=True)
+        return None
+
+def _wait_for_console_connection(banner_message, devices, baud):
+    """Cicla mostrando 'banner_message' en amarillo hasta detectar el cable de
+    consola conectado (dispositivo serial presente) y establecer una sesion
+    minicom valida sobre alguno de los 'devices'. No retorna hasta lograrlo."""
+    while True:
+        available = [d for d in devices if os.path.exists(d)]
+
+        if not available:
+            _print_yellow_banner(banner_message)
+            print("[*] Cable de consola no detectado aun. Reintentando en 3 segundos...")
+            time.sleep(3)
+            continue
+
+        for device in available:
+            child = _try_minicom_connect(device, baud)
+            if child:
+                print(f"[✓] Conexion via minicom establecida en {device}")
+                return child, device
+
+        print("[!] Se detecto el dispositivo pero no se pudo abrir minicom. Reintentando en 3 segundos...")
+        time.sleep(3)
+
+def _minicom_exit(child):
+    """Sale de una sesion minicom con Ctrl+A, X, confirmando el dialogo
+    'Leave Minicom?' con ENTER (la opcion 'Yes' viene resaltada por defecto).
+    Es seguro llamarla mas de una vez sobre el mismo 'child': si la sesion
+    ya esta cerrada, no hace nada (evita el error 'Bad file descriptor')."""
+    if child is None or getattr(child, "closed", False):
+        return
+    print("[*] Saliendo de minicom (Ctrl+A, X)...")
+    try:
+        child.send(chr(1))  # Ctrl+A
+        time.sleep(0.5)
+        child.send("x")
+        idx = child.expect(
+            [r"Leave Minicom\?", pexpect.TIMEOUT, pexpect.EOF],
+            timeout=15
+        )
+        if idx == 0:
+            child.sendline("")  # "Yes" viene resaltado por defecto, Enter confirma
+    except Exception as e:
+        print(f"[!] Advertencia: no se pudo confirmar la salida limpia de minicom ({e}).")
+    finally:
+        try:
+            child.close(force=True)
+        except Exception:
+            pass
+
+def _juniper_expect_or_fail(child, patterns, timeout, error_msg):
+    """Helper para juniper_config(): hace expect() sobre 'patterns' y agrega
+    pexpect.TIMEOUT y pexpect.EOF automaticamente como ultimas opciones.
+    Si cae en TIMEOUT/EOF, imprime el banner de fallo y lanza RuntimeError.
+    NO cierra minicom aqui: el 'finally' de juniper_config() se encarga de
+    eso una sola vez, para evitar cierres duplicados sobre el mismo child."""
+    full_patterns = list(patterns) + [pexpect.TIMEOUT, pexpect.EOF]
+    idx = child.expect(full_patterns, timeout=timeout)
+    if idx >= len(patterns):
+        print_ascii_fail()
+        raise RuntimeError(error_msg)
+    return idx
+
+def juniper_config():
+    if is_step_completed("juniper_config"):
+        print("[=] Paso 'juniper_config' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Configuracion Automatica del Juniper via Consola Serial ---")
+
+    mensaje = (
+        "Conecte cable consola al puerto CON del Juniper (Por la parte de atras) "
+        "y el otro extremo a un puerto USB 3.0 del Superlogics/ABMX."
+    )
+
+    # --- PASO A: Ciclar hasta detectar el cable de consola y conectar via minicom ---
+    child, used_device = _wait_for_console_connection(mensaje, ["/dev/ttyUSB0", "/dev/ttyUSB1"], 9600)
+    child.logfile_read = sys.stdout
+
+    try:
+        # NOTA: los patrones de prompt NO se anclan con '\s*$' porque minicom
+        # refresca periodicamente su barra de estado inferior, lo que puede
+        # agregar bytes al final del buffer y romper un anclaje estricto al
+        # final de la cadena. Basta con que el patron aparezca en el stream.
+
+        # --- PASO B: Login ---
+        print("[*] Buscando prompt de login del Juniper...")
+        child.sendline("")
+        idx = _juniper_expect_or_fail(
+            child,
+            [r"login:", r"root@.*[%>#]\s"],
+            timeout=20,
+            error_msg="No se detecto el prompt 'login:' del Juniper tras conectar por consola."
+        )
+
+        if idx == 0:
+            print("[*] Prompt 'login:' detectado. Ingresando usuario 'root'...")
+            child.sendline("root")
+        else:
+            print("[=] La sesion ya se encontraba autenticada en el Juniper.")
+
+        # --- PASO C: Validar version de JUNOS ---
+        print("[*] Validando version de JUNOS...")
+        idx = child.expect([
+            r"JUNOS 20\.2R2\.11 Kernel 64-bit FLEX JNPR-11\.0",
+            pexpect.TIMEOUT,
+            pexpect.EOF
+        ], timeout=20)
+
+        if idx != 0:
+            # --- Version incorrecta: instruir downgrade manual y cerrar el programa ---
+            RED = "\033[91m\033[1m"
+            RESET = "\033[0m"
+            print(f"\n{RED}Version JUNIPER Incorrecta!!! Realizar Downgrade de Juniper...{RESET}\n")
+
+            downgrade_msg = (
+                "###Downgrade Juniper\n"
+                "#Conecte cable consola a Juniper\n"
+                "sudo apt install putty\n"
+                "sudo putty -serial /dev/ttyUSB0 -sercfg 9600,8,n,1,N\n"
+                "#si da error la USB0 cambiar por USB1\n"
+                "#Coloque memoria usb con la imagen del juniper\n"
+                "shutdown -r now\n"
+                "#Mantenga latecla ESC presionada\n"
+                "#dentro del bios de la juniper seleccione BOOT MANAGER\n"
+                "#Seleccione la usb con laimagen\n"
+                "#Instale la imagen"
+            )
+            _print_yellow_banner(downgrade_msg)
+
+            input("Presione enter para continuar...")
+
+            print_ascii_fail()
+            print("[!] Cerrando gf_provisioning.py para realizar el downgrade manual del Juniper.")
+            sys.exit(1)  # El 'finally' de juniper_config() cierra minicom durante el unwind
+
+        print("[✓] Version de JUNOS validada correctamente.")
+
+        # Esperar el prompt de shell antes de entrar al cli
+        _juniper_expect_or_fail(
+            child,
+            [r"%\s"],
+            timeout=20,
+            error_msg="No se detecto el prompt de shell ('%') del Juniper tras el login."
+        )
+
+        # --- PASO D: Entrar al CLI y modo de configuracion ---
+        print("[*] Entrando al CLI del Juniper...")
+        child.sendline("cli")
+        _juniper_expect_or_fail(
+            child, [r">\s"], timeout=20,
+            error_msg="No se detecto el prompt operacional ('>') tras ejecutar 'cli'."
+        )
+
+        child.sendline("configure")
+        _juniper_expect_or_fail(
+            child, [r"#\s"], timeout=20,
+            error_msg="No se detecto el prompt de configuracion ('#') tras ejecutar 'configure'."
+        )
+
+        # --- PASO E: Contrasena de root-authentication ---
+        print("[*] Configurando root-authentication plain-text-password...")
+        child.sendline("set system root-authentication plain-text-password")
+        _juniper_expect_or_fail(
+            child, [r"[Nn]ew password:"], timeout=20,
+            error_msg="No se recibio el prompt 'New password:' de JUNOS."
+        )
+        child.sendline("google123")
+        _juniper_expect_or_fail(
+            child, [r"[Rr]etype new password:"], timeout=20,
+            error_msg="No se recibio el prompt 'Retype new password:' de JUNOS."
+        )
+        child.sendline("google123")
+        _juniper_expect_or_fail(
+            child, [r"#\s"], timeout=20,
+            error_msg="No se regreso al prompt de configuracion tras fijar la contrasena de root."
+        )
+
+        print("[*] Ejecutando commit (root-authentication)...")
+        child.sendline("commit")
+        _juniper_expect_or_fail(
+            child, [r"commit complete"], timeout=60,
+            error_msg="El 'commit' de root-authentication no reporto 'commit complete'."
+        )
+
+        # --- PASO F: Eliminar chassis auto-image-upgrade ---
+        print("[*] Eliminando chassis auto-image-upgrade...")
+        child.sendline("delete chassis auto-image-upgrade")
+        _juniper_expect_or_fail(
+            child, [r"#\s"], timeout=20,
+            error_msg="No se regreso al prompt de configuracion tras 'delete chassis auto-image-upgrade'."
+        )
+
+        child.sendline("commit")
+        _juniper_expect_or_fail(
+            child, [r"commit complete"], timeout=60,
+            error_msg="El 'commit' de 'delete chassis auto-image-upgrade' no reporto 'commit complete'."
+        )
+
+        # --- PASO G: Wildcard range (limpieza y seteo de interfaces) ---
+        wildcard_commands = [
+            "wildcard range delete interfaces et-0/0/[0-31] unit 0 family inet",
+            "wildcard range delete interfaces et-0/0/[0-31]:[0-3] unit 0 family inet",
+            "wildcard range delete interfaces xe-0/0/[0-31]:[0-3] unit 0 family inet",
+            "wildcard range delete interfaces et-0/0/[0-31] unit 0",
+            "wildcard range delete interfaces et-0/0/[0-31]:[0-3] unit 0",
+            "wildcard range delete interfaces xe-0/0/[0-31]:[0-3] unit 0",
+            "wildcard range set interfaces et-0/0/[0-31] unit 0 family ethernet-switching",
+            "wildcard range set interfaces xe-0/0/[0-31]:[0-3] unit 0 family ethernet-switching",
+        ]
+        print("[*] Ejecutando comandos 'wildcard range' sobre las interfaces...")
+        for wc_cmd in wildcard_commands:
+            child.sendline(wc_cmd)
+            _juniper_expect_or_fail(
+                child, [r"#\s"], timeout=30,
+                error_msg=f"No se regreso al prompt de configuracion tras: '{wc_cmd}'."
+            )
+
+        print("[*] Ejecutando commit final de interfaces...")
+        child.sendline("commit")
+        _juniper_expect_or_fail(
+            child, [r"commit complete"], timeout=60,
+            error_msg="El 'commit' final de interfaces no reporto 'commit complete'."
+        )
+
+        # --- PASO H: Salir de configuracion y validaciones finales ---
+        child.sendline("exit")
+        _juniper_expect_or_fail(
+            child, [r">\s"], timeout=20,
+            error_msg="No se regreso al modo operacional ('>') tras 'exit' de configure."
+        )
+
+        print("[*] Revisando alarmas del sistema (antes de rescue save)...")
+        child.sendline("show system alarms")
+        _juniper_expect_or_fail(
+            child, [r">\s"], timeout=20,
+            error_msg="No se recibio respuesta de 'show system alarms'."
+        )
+
+        print("[*] Guardando configuracion de rescate (rescue save)...")
+        child.sendline("request system configuration rescue save")
+        _juniper_expect_or_fail(
+            child, [r">\s"], timeout=30,
+            error_msg="No se recibio confirmacion de 'request system configuration rescue save'."
+        )
+
+        print("[*] Revisando alarmas del sistema (despues de rescue save)...")
+        child.sendline("show system alarms")
+        _juniper_expect_or_fail(
+            child, [r">\s"], timeout=20,
+            error_msg="No se recibio respuesta de 'show system alarms' (segunda revision)."
+        )
+
+        # --- PASO I: Salir del CLI y reiniciar el equipo ---
+        print("[*] Saliendo del CLI de JUNOS...")
+        child.sendline("exit")
+        _juniper_expect_or_fail(
+            child, [r"%\s", r"login:"], timeout=20,
+            error_msg="No se regreso al prompt de shell tras salir del CLI."
+        )
+
+        print("[*] Ejecutando 'shutdown -r now' para reiniciar el Juniper...")
+        child.sendline("shutdown -r now")
+        # El equipo comienza a reiniciar y la sesion serial se vuelve inestable;
+        # no se espera un prompt especifico, solo se da tiempo a que el comando se envie.
+        time.sleep(5)
+
+    finally:
+        # --- PASO J: Salir de minicom (Ctrl+A, X) sin importar el resultado anterior ---
+        _minicom_exit(child)
+
+    print("[✓] Configuracion del Juniper completada exitosamente.")
+    mark_step_completed("juniper_config", {"juniper_console_device": used_device})
+
+def zpe_config():
+    if is_step_completed("zpe_config"):
+        print("[=] Paso 'zpe_config' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Configuracion Automatica del ZPE via Consola Serial ---")
+
+    mensaje = (
+        "Conecte cable consola al puerto CONSOLE del ZPE y el otro extremo "
+        "a un puerto USB 3.0 del Superlogics/ABMX."
+    )
+
+    # --- PASO A: Ciclar hasta detectar el cable de consola y conectar via minicom ---
+    child, used_device = _wait_for_console_connection(mensaje, ["/dev/ttyUSB0", "/dev/ttyUSB1"], 115200)
+    child.logfile_read = sys.stdout
+
+    zpe_mac = None
+
+    try:
+        # --- PASO B: Login automatico (user: admin / password: admin) ---
+        # NOTA: los patrones de prompt NO se anclan con '\s*$' porque minicom
+        # refresca periodicamente su barra de estado inferior, lo que puede
+        # agregar bytes al final del buffer y romper un anclaje estricto al
+        # final de la cadena. Basta con que el patron aparezca en el stream.
+        print("[*] Buscando prompt de login del ZPE...")
+        child.sendline("")
+        idx = child.expect([
+            r"[Uu]ser(name)?:",
+            r"\[admin@nodegrid[^\]]*\]#\s",
+            pexpect.TIMEOUT,
+            pexpect.EOF
+        ], timeout=20)
+
+        if idx == 0:
+            print("[*] Prompt 'user:' detectado. Enviando usuario 'admin'...")
+            child.sendline("admin")
+            idx2 = child.expect([r"[Pp]ass(word)?:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+            if idx2 != 0:
+                print_ascii_fail()
+                raise RuntimeError("No se recibio el prompt 'password:' del ZPE tras enviar el usuario.")
+            print("[*] Prompt 'password:' detectado. Enviando password 'admin'...")
+            child.sendline("admin")
+            idx3 = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+            if idx3 != 0:
+                print_ascii_fail()
+                raise RuntimeError("No se recibio el prompt de shell ('#') del ZPE tras el login.")
+        elif idx == 1:
+            print("[=] La sesion ya se encontraba autenticada en el ZPE.")
+        else:
+            print_ascii_fail()
+            raise RuntimeError("No se detecto el prompt 'user:' del ZPE tras conectar por consola.")
+
+        print("[✓] Login en el ZPE completado.")
+
+        # --- PASO C: Navegar a network_connections y leer la MAC de ETH1 ---
+        print("[*] Consultando /settings/network_connections...")
+        child.sendline("cd /settings/network_connections")
+        idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        if idx != 0:
+            print_ascii_fail()
+            raise RuntimeError("No se pudo entrar a /settings/network_connections en el ZPE.")
+
+        child.sendline("show")
+        idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=45)
+        if idx != 0:
+            print_ascii_fail()
+            raise RuntimeError("No se recibio la salida del comando 'show' en el ZPE.")
+
+        show_output = child.before
+
+        eth1_idx = show_output.find("ETH1")
+        if eth1_idx == -1:
+            print_ascii_fail()
+            raise RuntimeError("No se encontro la seccion 'ETH1' en la salida de 'show' del ZPE.")
+
+        section = show_output[eth1_idx:]
+        next_eth_idx = section.find("ETH", 4)
+        next_hotspot_idx = section.find("hotspot")
+        end_candidates = [i for i in (next_eth_idx, next_hotspot_idx) if i != -1]
+        section = section[:min(end_candidates)] if end_candidates else section
+
+        mac_matches = re.findall(r'([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})', section)
+        if not mac_matches:
+            print_ascii_fail()
+            raise RuntimeError("No se pudo extraer la direccion MAC de ETH1 en la salida del ZPE.")
+
+        zpe_mac = mac_matches[0].lower()
+        print(f"[+] MAC ETH1 (ZPE) detectada: {zpe_mac}")
+
+    finally:
+        # --- PASO D: Salir de minicom (Ctrl+A, X). Se ejecuta una sola vez,
+        # tanto en el camino exitoso como en cualquier fallo anterior. ---
+        _minicom_exit(child)
+
+    # --- PASO E: Guardar la MAC del ZPE en el estado ---
+    mark_step_completed("zpe_config", {"zpe_mac": zpe_mac})
+
+    # --- PASO F: Actualizar /etc/dhcp/dhcpd.conf con la MAC real del ZPE ---
+    print("[*] Actualizando /etc/dhcp/dhcpd.conf con la MAC real del ZPE...")
+    new_line = f"host zpe {{ hardware ethernet {zpe_mac}; fixed-address 10.0.0.253; }}"
+    sed_cmd = (
+        "sudo sed -i '/host zpe { hardware ethernet/c\\"
+        f"{new_line}' /etc/dhcp/dhcpd.conf"
+    )
+    run_interactive(sed_cmd)
+
+    print("[*] Verificando que la MAC se haya aplicado correctamente...")
+    run_interactive(f"sudo grep -q '{zpe_mac}' /etc/dhcp/dhcpd.conf")
+
+    print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
+    run_interactive("sudo systemctl restart isc-dhcp-server")
+    run_interactive("sudo systemctl restart isc-dhcp-server6")
+
+    # --- PASO G: Ejecutar script de configuracion de todos los puertos del ZPE via SSH ---
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    zpe_script_dir = f"/home/{sudo_user}/lego-infra/lego_setup/lego_zpe_console_server"
+    ssh_cmd = (
+        f"cd {zpe_script_dir} && "
+        "ssh -t -t -v -o ConnectTimeout=10 admin@10.0.0.253 < lego_config_zpe_allports.sh"
+    )
+    print(f"[CMD Interactive] {ssh_cmd}")
+    ssh_child = pexpect.spawn("bash", ["-c", ssh_cmd], encoding="utf-8", timeout=600)
+    ssh_child.logfile_read = sys.stdout
+
+    idx = ssh_child.expect([
+        r"\(admin@10\.0\.0\.253\)\s*Password:",
+        pexpect.EOF,
+        pexpect.TIMEOUT
+    ], timeout=60)
+
+    if idx == 0:
+        print("[*] Prompt de password SSH detectado. Enviando password 'admin'...")
+        ssh_child.sendline("admin")
+        idx2 = ssh_child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=540)
+        if idx2 != 0:
+            print_ascii_fail()
+            ssh_child.close(force=True)
+            raise RuntimeError("Timeout esperando que finalice lego_config_zpe_allports.sh via SSH.")
+    elif idx == 1:
+        print("[=] La sesion SSH finalizo sin solicitar password (posible autenticacion por llave).")
+    else:
+        print_ascii_fail()
+        ssh_child.close(force=True)
+        raise RuntimeError("Timeout esperando el prompt de password SSH hacia el ZPE (10.0.0.253).")
+
+    ssh_child.close()
+    if ssh_child.exitstatus not in (0, None):
+        print_ascii_fail()
+        raise RuntimeError(
+            f"Error ejecutando lego_config_zpe_allports.sh via SSH (Exit code: {ssh_child.exitstatus})"
+        )
+
+    print("[✓] Configuracion del ZPE completada exitosamente.")
+
 def download_python_tools():
     if is_step_completed("download_python_tools"):
         print("[=] Paso 'download_python_tools' ya fue ejecutado previamente. Omitiendo...")
@@ -1089,6 +1559,8 @@ if __name__ == "__main__":
     run_final_abmx_config()
     create_networkmanager_symlink()
     network_plan()
+    juniper_config()
+    zpe_config()
     download_python_tools()
     fix_chrome()
     end_config_reboot()
