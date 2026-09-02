@@ -24,12 +24,14 @@ class DualLogger:
 
     def write(self, message):
         self.terminal.write(message)
-        self.logfile.write(message)
+        if self.logfile and not self.logfile.closed:
+            self.logfile.write(message)
         self.flush()
 
     def flush(self):
         self.terminal.flush()
-        self.logfile.flush()
+        if self.logfile and not self.logfile.closed:
+            self.logfile.flush()
 
     def close(self):
         if self.logfile and not self.logfile.closed:
@@ -932,6 +934,82 @@ network:
 
     mark_step_completed("network_plan")
 
+def force_test_network_selection():
+    """Fuerza que la conexion 'Test Network' quede activa y priorizada en la interfaz ens4f0."""
+    if is_step_completed("force_test_network_selection"):
+        print("[=] Paso 'force_test_network_selection' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Forzar seleccion de 'Test Network' en Ethernet (ens4f0) ---")
+
+    interface = "ens4f0"
+    target_conn = "Test Network"
+
+    print(f"[*] Consultando perfiles de NetworkManager asociados a {interface}...")
+    result = subprocess.run(
+        ["nmcli", "-t", "-f", "NAME,DEVICE,UUID", "connection", "show"],
+        capture_output=True, text=True
+    )
+
+    if result.returncode != 0:
+        print_ascii_fail()
+        raise RuntimeError(f"No se pudo consultar las conexiones de NetworkManager: {result.stderr.strip()}")
+
+    profiles_on_iface = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split(":")
+        if len(parts) < 3:
+            continue
+        name, device = parts[0], parts[1]
+        if device == interface:
+            profiles_on_iface.append(name)
+
+    print(f"[+] Perfiles detectados en {interface}: {profiles_on_iface or 'ninguno activo actualmente'}")
+
+    all_names = subprocess.run(
+        ["nmcli", "-t", "-f", "NAME", "connection", "show"],
+        capture_output=True, text=True
+    ).stdout.splitlines()
+
+    if target_conn not in all_names:
+        print_ascii_fail()
+        raise RuntimeError(
+            f"El perfil '{target_conn}' no existe en NetworkManager. "
+            f"Debe crearse antes de poder forzar su seleccion."
+        )
+
+    print(f"[*] Activando el perfil '{target_conn}' en {interface}...")
+    run_interactive(f'sudo nmcli connection up id "{target_conn}" ifname {interface}')
+
+    print(f"[*] Asignando autoconexion y prioridad alta a '{target_conn}'...")
+    run_interactive(
+        f'sudo nmcli connection modify "{target_conn}" '
+        f'connection.autoconnect yes connection.autoconnect-priority 100'
+    )
+
+    print(f"[*] Despriorizando otros perfiles detectados en {interface}...")
+    for name in profiles_on_iface:
+        if name == target_conn:
+            continue
+        print(f"    [-] Despriorizando perfil '{name}'...")
+        run_interactive(f'sudo nmcli connection modify "{name}" connection.autoconnect-priority -100')
+
+    print(f"[*] Verificando que '{target_conn}' quedo como conexion activa en {interface}...")
+    verify = subprocess.run(
+        ["nmcli", "-t", "-f", "GENERAL.CONNECTION", "device", "show", interface],
+        capture_output=True, text=True
+    )
+    active_conn = verify.stdout.strip().split(":", 1)[-1].strip() if verify.stdout else ""
+
+    if active_conn != target_conn:
+        print_ascii_fail()
+        raise RuntimeError(
+            f"La conexion activa en {interface} es '{active_conn}', se esperaba '{target_conn}'."
+        )
+
+    print(f"[✓] '{target_conn}' quedo forzada como conexion activa en {interface}.")
+    mark_step_completed("force_test_network_selection")
+
 def _print_yellow_banner(message):
     """Imprime un mensaje resaltado en amarillo, con borde, para instrucciones manuales."""
     YELLOW = "\033[93m\033[1m"
@@ -939,6 +1017,15 @@ def _print_yellow_banner(message):
     border = "=" * 80
     print(f"\n{YELLOW}{border}")
     print(f"[!] {message}")
+    print(f"{border}{RESET}\n")
+
+def _print_green_banner(message):
+    """Imprime un mensaje resaltado en verde, con borde, para confirmar exito o estado."""
+    GREEN = "\033[92m\033[1m"
+    RESET = "\033[0m"
+    border = "=" * 80
+    print(f"\n{GREEN}{border}")
+    print(f"[✓] {message}")
     print(f"{border}{RESET}\n")
 
 def _try_minicom_connect(device, baud):
@@ -998,6 +1085,30 @@ def _wait_for_console_connection(banner_message, devices, baud):
         print("[!] Se detecto el dispositivo pero no se pudo abrir minicom. Reintentando en 3 segundos...")
         time.sleep(3)
 
+def _wait_for_console_connection_enter(banner_message, devices, baud):
+    """Igual que '_wait_for_console_connection', pero en vez de sondear solo,
+    exige que el usuario presione ENTER antes de cada intento de deteccion.
+    Muestra 'banner_message', espera ENTER y valida el cable de consola; si
+    no se detecta (o no se logra abrir minicom), vuelve a mostrar el banner
+    y a esperar ENTER, repitiendo hasta lograr una conexion valida."""
+    while True:
+        _print_yellow_banner(banner_message)
+        input("Conecte el cable de consola y presione ENTER para continuar...")
+
+        available = [d for d in devices if os.path.exists(d)]
+
+        if not available:
+            print("[!] Cable de consola no detectado. Verifique la conexion e intente nuevamente.")
+            continue
+
+        for device in available:
+            child = _try_minicom_connect(device, baud)
+            if child:
+                print(f"[✓] Conexion via minicom establecida en {device}")
+                return child, device
+
+        print("[!] Se detecto el dispositivo pero no se pudo abrir minicom. Intente nuevamente.")
+
 def _minicom_exit(child):
     """Sale de una sesion minicom con Ctrl+A, X, confirmando el dialogo
     'Leave Minicom?' con ENTER (la opcion 'Yes' viene resaltada por defecto).
@@ -1049,8 +1160,8 @@ def juniper_config():
         "y el otro extremo a un puerto USB 3.0 del Superlogics/ABMX."
     )
 
-    # --- PASO A: Ciclar hasta detectar el cable de consola y conectar via minicom ---
-    child, used_device = _wait_for_console_connection(mensaje, ["/dev/ttyUSB0", "/dev/ttyUSB1"], 9600)
+    # --- PASO A: Exigir ENTER del usuario y validar el cable de consola antes de continuar ---
+    child, used_device = _wait_for_console_connection_enter(mensaje, ["/dev/ttyUSB0", "/dev/ttyUSB1"], 9600)
     child.logfile_read = sys.stdout
 
     try:
@@ -1072,18 +1183,52 @@ def juniper_config():
         if idx == 0:
             print("[*] Prompt 'login:' detectado. Ingresando usuario 'root'...")
             child.sendline("root")
+
+            # --- Verificar si el Juniper pide password tras el usuario 'root' ---
+            # Si aparece 'Password:', significa que el equipo ya tiene una
+            # contrasena de root configurada, es decir, ya fue provisionado
+            # previamente: se omite el resto de la configuracion.
+            print("[*] Validando version de JUNOS...")
+            idx_auth = child.expect([
+                r"Password:",
+                r"JUNOS 20\.2R2\.11 Kernel 64-bit FLEX JNPR-11\.0",
+                pexpect.TIMEOUT,
+                pexpect.EOF
+            ], timeout=20)
+
+            if idx_auth == 0:
+                print("[=] El Juniper solicito 'Password:' tras ingresar 'root': "
+                      "esto indica que ya se encuentra configurado.")
+                _minicom_exit(child)
+                _print_green_banner(
+                    "EL JUNIPER YA ESTABA CONFIGURADO. Se omite el resto de los "
+                    "pasos de configuracion automatica para este equipo."
+                )
+                mark_step_completed(
+                    "juniper_config",
+                    {"juniper_console_device": used_device, "juniper_already_configured": True}
+                )
+                return
+            elif idx_auth in (2, 3):
+                print_ascii_fail()
+                raise RuntimeError(
+                    "No se detecto ni el prompt 'Password:' ni la version esperada de "
+                    "JUNOS tras ingresar el usuario 'root'."
+                )
+            # idx_auth == 1: version de JUNOS detectada directamente, se continua abajo.
         else:
             print("[=] La sesion ya se encontraba autenticada en el Juniper.")
 
-        # --- PASO C: Validar version de JUNOS ---
-        print("[*] Validando version de JUNOS...")
-        idx = child.expect([
-            r"JUNOS 20\.2R2\.11 Kernel 64-bit FLEX JNPR-11\.0",
-            pexpect.TIMEOUT,
-            pexpect.EOF
-        ], timeout=20)
+            # --- PASO C: Validar version de JUNOS ---
+            print("[*] Validando version de JUNOS...")
+            idx_auth = child.expect([
+                r"JUNOS 20\.2R2\.11 Kernel 64-bit FLEX JNPR-11\.0",
+                pexpect.TIMEOUT,
+                pexpect.EOF
+            ], timeout=20)
+            idx_auth = 1 if idx_auth == 0 else idx_auth + 1  # normalizar al mismo indice que la rama de arriba
 
-        if idx != 0:
+        if idx_auth != 1:
             # --- Version incorrecta: instruir downgrade manual y cerrar el programa ---
             RED = "\033[91m\033[1m"
             RESET = "\033[0m"
@@ -1245,7 +1390,7 @@ def juniper_config():
         # --- PASO J: Salir de minicom (Ctrl+A, X) sin importar el resultado anterior ---
         _minicom_exit(child)
 
-    print("[✓] Configuracion del Juniper completada exitosamente.")
+    _print_green_banner("CONFIGURACION DEL JUNIPER COMPLETADA EXITOSAMENTE.")
     mark_step_completed("juniper_config", {"juniper_console_device": used_device})
 
 def zpe_config():
@@ -1260,8 +1405,8 @@ def zpe_config():
         "a un puerto USB 3.0 del Superlogics/ABMX."
     )
 
-    # --- PASO A: Ciclar hasta detectar el cable de consola y conectar via minicom ---
-    child, used_device = _wait_for_console_connection(mensaje, ["/dev/ttyUSB0", "/dev/ttyUSB1"], 115200)
+    # --- PASO A: Exigir ENTER del usuario y validar el cable de consola antes de continuar ---
+    child, used_device = _wait_for_console_connection_enter(mensaje, ["/dev/ttyUSB0", "/dev/ttyUSB1"], 115200)
     child.logfile_read = sys.stdout
 
     zpe_mac = None
@@ -1275,6 +1420,7 @@ def zpe_config():
         print("[*] Buscando prompt de login del ZPE...")
         child.sendline("")
         idx = child.expect([
+            r"nodegrid login:",
             r"[Uu]ser(name)?:",
             r"\[admin@nodegrid[^\]]*\]#\s",
             pexpect.TIMEOUT,
@@ -1282,6 +1428,20 @@ def zpe_config():
         ], timeout=20)
 
         if idx == 0:
+            # --- El hostname ya es 'nodegrid' -> el ZPE ya fue configurado previamente ---
+            print("[=] Se detecto el prompt 'nodegrid login:': "
+                  "esto indica que el ZPE ya se encuentra configurado.")
+            _minicom_exit(child)
+            _print_green_banner(
+                "EL ZPE YA ESTABA CONFIGURADO. Se omite el resto de los pasos "
+                "de configuracion automatica para este equipo."
+            )
+            mark_step_completed(
+                "zpe_config",
+                {"zpe_console_device": used_device, "zpe_already_configured": True}
+            )
+            return
+        elif idx == 1:
             print("[*] Prompt 'user:' detectado. Enviando usuario 'admin'...")
             child.sendline("admin")
             idx2 = child.expect([r"[Pp]ass(word)?:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
@@ -1294,7 +1454,7 @@ def zpe_config():
             if idx3 != 0:
                 print_ascii_fail()
                 raise RuntimeError("No se recibio el prompt de shell ('#') del ZPE tras el login.")
-        elif idx == 1:
+        elif idx == 2:
             print("[=] La sesion ya se encontraba autenticada en el ZPE.")
         else:
             print_ascii_fail()
@@ -1400,7 +1560,7 @@ def zpe_config():
             f"Error ejecutando lego_config_zpe_allports.sh via SSH (Exit code: {ssh_child.exitstatus})"
         )
 
-    print("[✓] Configuracion del ZPE completada exitosamente.")
+    _print_green_banner("CONFIGURACION DEL ZPE COMPLETADA EXITOSAMENTE.")
 
 def _scp_download(remote_user, remote_host, remote_path, destination="."):
     """Descarga (recursivamente) 'remote_path' desde 'remote_user@remote_host' hacia
@@ -1695,6 +1855,64 @@ def fix_chrome():
     print("[✓] Google Chrome ha sido eliminado y reinstalado exitosamente.")
     mark_step_completed("fix_chrome")
 
+def _flush_log_to_disk():
+    """Fuerza flush + fsync del archivo de log a disco SIN cerrarlo, para no
+    romper los print() posteriores (sys.stdout/sys.stderr siguen redirigidos
+    al DualLogger). A diferencia de log_final_summary()/logger_instance.close(),
+    esta funcion es segura de llamar en medio de la ejecucion."""
+    try:
+        logger_instance.logfile.flush()
+        os.fsync(logger_instance.logfile.fileno())
+    except Exception as e:
+        print(f"[!] Advertencia: no se pudo forzar el fsync del log ({e}).")
+
+def _force_reboot():
+    """Fuerza el reinicio del sistema de forma robusta, con multiples
+    fallbacks. Como el equipo puede empezar a apagarse a mitad de la
+    ejecucion (dejando la sesion/pipe inestable), NINGUNA excepcion de un
+    intento detiene el flujo: se pasa directamente al siguiente metodo.
+    Solo se lanza RuntimeError si absolutamente todos los intentos fallan."""
+
+    # --- Intento 1: reboot interactivo via pexpect (maneja prompt de sudo) ---
+    reboot_cmd = "sudo reboot"
+    print(f"[CMD Interactive] {reboot_cmd}")
+    try:
+        child = pexpect.spawn("bash", ["-c", reboot_cmd], encoding="utf-8", timeout=30)
+        child.logfile_read = sys.stdout
+        idx = child.expect([
+            r"\[sudo\] password for .*:?",
+            r"[pP]assword:",
+            pexpect.EOF,
+            pexpect.TIMEOUT
+        ], timeout=30)
+        if idx in (0, 1):
+            child.sendline(SUDO_PASSWORD)
+            child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=30)
+        child.close(force=True)
+        print("[✓] Comando de reinicio enviado correctamente (pexpect).")
+        return
+    except Exception as e:
+        print(f"[!] El reinicio via pexpect fallo o la sesion se volvio inestable: {e}")
+
+    # --- Intento 2: fallback directo por subprocess con password pipeada ---
+    print("[*] Reintentando el reinicio via fallback (subprocess + sudo -S)...")
+    try:
+        subprocess.run(f'echo "{SUDO_PASSWORD}" | sudo -S reboot', shell=True, timeout=30)
+        print("[✓] Comando de reinicio enviado correctamente (fallback subprocess).")
+        return
+    except Exception as e:
+        print(f"[!] El fallback por subprocess tambien fallo: {e}")
+
+    # --- Intento 3: ultimo recurso, reboot forzado (reboot -f) ---
+    print("[*] Ultimo recurso: forzando el reinicio con 'reboot -f'...")
+    try:
+        subprocess.run(f'echo "{SUDO_PASSWORD}" | sudo -S reboot -f', shell=True, timeout=30)
+        print("[✓] Comando de reinicio forzado enviado correctamente ('reboot -f').")
+        return
+    except Exception as e:
+        print_ascii_fail()
+        raise RuntimeError(f"No se pudo forzar el reinicio del sistema por ningun metodo: {e}")
+
 def end_config_reboot():
     if is_step_completed("end_config_reboot"):
         print("[=] Paso 'end_config_reboot' ya fue ejecutado previamente. Omitiendo...")
@@ -1734,11 +1952,20 @@ def end_config_reboot():
             sys.stdin.readline()
             break
 
-    print("\n\n[*] Forzando cierre del log a disco antes del reboot...")
-    log_final_summary()
+    # NOTA: aqui antes se llamaba a log_final_summary(), que CIERRA el archivo
+    # de log. Como sys.stdout/sys.stderr siguen redirigidos al DualLogger, el
+    # primer print() posterior a ese cierre lanzaba una excepcion (escritura
+    # sobre archivo cerrado) que mataba el script ANTES de llegar a ejecutar
+    # el reboot. Se reemplaza por un flush+fsync que NO cierra el archivo, y
+    # el cierre real se deja como ultimo paso, ya con el reinicio en curso.
+    print("\n\n[*] Forzando el flush del log a disco (sin cerrarlo) antes del reboot...")
+    _flush_log_to_disk()
 
-    print("[*] Iniciando reinicio del sistema...")
-    run_interactive("sudo reboot")
+    print("[*] Forzando el reinicio del sistema...")
+    _force_reboot()
+
+    print("[*] Cerrando el log de ejecucion...")
+    log_final_summary()
 
 if __name__ == "__main__":
     set_ID()
@@ -1748,11 +1975,12 @@ if __name__ == "__main__":
     run_security_patch()
     validate_and_lego_setup()
     setup_nomachine_yaml()
-    provisional_dhcp()
     run_ansible_playbook()
+    provisional_dhcp()
+    network_plan()
+    force_test_network_selection()
     run_final_abmx_config()
     create_networkmanager_symlink()
-    network_plan()
     juniper_config()
     zpe_config()
     vrmu_util_config()
