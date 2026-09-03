@@ -1451,6 +1451,7 @@ def zpe_config():
     child.logfile_read = sys.stdout
 
     zpe_mac = None
+    already_configured = False
 
     try:
         # --- PASO B: Login automatico (user: admin / password: admin) ---
@@ -1472,16 +1473,19 @@ def zpe_config():
             # --- El hostname ya es 'nodegrid' -> el ZPE ya fue configurado previamente ---
             print("[=] Se detecto el prompt 'nodegrid login:': "
                   "esto indica que el ZPE ya se encuentra configurado.")
-            _minicom_exit(child)
-            _print_green_banner(
-                "EL ZPE YA ESTABA CONFIGURADO. Se omite el resto de los pasos "
-                "de configuracion automatica para este equipo."
-            )
-            mark_step_completed(
-                "zpe_config",
-                {"zpe_console_device": used_device, "zpe_already_configured": True}
-            )
-            return
+            already_configured = True
+            print("[*] Enviando usuario 'admin' para extraer la MAC...")
+            child.sendline("admin")
+            idx2 = child.expect([r"[Pp]ass(word)?:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+            if idx2 != 0:
+                print_ascii_fail()
+                raise RuntimeError("No se recibio el prompt 'password:' del ZPE tras enviar el usuario.")
+            print("[*] Prompt 'password:' detectado. Enviando password 'admin'...")
+            child.sendline("admin")
+            idx3 = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+            if idx3 != 0:
+                print_ascii_fail()
+                raise RuntimeError("No se recibio el prompt de shell ('#') del ZPE tras el login.")
         elif idx == 1:
             print("[*] Prompt 'user:' detectado. Enviando usuario 'admin'...")
             child.sendline("admin")
@@ -1544,7 +1548,7 @@ def zpe_config():
         _minicom_exit(child)
 
     # --- PASO E: Guardar la MAC del ZPE en el estado ---
-    mark_step_completed("zpe_config", {"zpe_mac": zpe_mac})
+    mark_step_completed("zpe_config", {"zpe_console_device": used_device, "zpe_mac": zpe_mac, "zpe_already_configured": already_configured})
 
     # --- PASO F: Actualizar /etc/dhcp/dhcpd.conf con la MAC real del ZPE ---
     print("[*] Actualizando /etc/dhcp/dhcpd.conf con la MAC real del ZPE...")
@@ -1561,6 +1565,14 @@ def zpe_config():
     print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
     run_interactive("sudo systemctl restart isc-dhcp-server")
     run_interactive("sudo systemctl restart isc-dhcp-server6")
+
+    # Si ya estaba configurado previamente, omitimos únicamente el script masivo de puertos por SSH
+    if already_configured:
+        _print_green_banner(
+            "EL ZPE YA ESTABA CONFIGURADO. Se extrajo la MAC y se actualizó el DHCP, "
+            "omitiendo la ejecución del script de configuración de puertos por SSH."
+        )
+        return
 
     # --- PASO G: Ejecutar script de configuracion de todos los puertos del ZPE via SSH ---
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
@@ -1602,7 +1614,7 @@ def zpe_config():
         )
 
     _print_green_banner("CONFIGURACION DEL ZPE COMPLETADA EXITOSAMENTE.")
-
+    
 def _scp_download(remote_user, remote_host, remote_path, destination="."):
     """Descarga (recursivamente) 'remote_path' desde 'remote_user@remote_host' hacia
     'destination' via scp, manejando el prompt de huella SSH y de contrasena
