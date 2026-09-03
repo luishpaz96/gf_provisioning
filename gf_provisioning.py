@@ -271,6 +271,27 @@ def mark_step_completed(step_name, extra_config=None):
     save_state(state)
     print(f"[✓] Paso '{step_name}' completado y registrado en {STATE_FILE}.")
 
+def _activate_sudo():
+    """Activa (o refresca) las credenciales de sudo en cache de forma NO
+    interactiva, usando SUDO_PASSWORD via 'sudo -S -v'. Se llama solo en
+    puntos puntuales del flujo (inicio del programa, tras el ansible local,
+    y tras salir del mirror), no de forma continua."""
+    try:
+        res = subprocess.run(
+            f'echo "{SUDO_PASSWORD}" | sudo -S -v',
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
+        if res.returncode != 0:
+            print(f"[!] Advertencia: no se pudo activar/refrescar sudo automaticamente "
+                  f"({res.stderr.strip()}).")
+        return res.returncode == 0
+    except Exception as e:
+        print(f"[!] Advertencia: excepcion al activar/refrescar sudo automaticamente ({e}).")
+        return False
+
 def run_command(cmd, check=True):
     print(f"[CMD] {cmd}")
     res = subprocess.run(cmd, shell=True)
@@ -670,6 +691,9 @@ def run_ansible_playbook():
 
     child.close()
 
+    print("[*] Reactivando sudo de forma automatica tras el comando de ansible...")
+    _activate_sudo()
+
     failed_match = re.search(r"failed=(\d+)", output_buffer)
     if failed_match:
         failed_count = int(failed_match.group(1))
@@ -713,6 +737,27 @@ def provisional_dhcp():
 
     mark_step_completed("provisional_dhcp")
 
+def reinstall_goss():
+    """Limpia binarios/archivos previos de Goss y lo reinstala de forma
+    automatizada via el script oficial de goss.rocks. Es un paso independiente
+    del testplan (con su propio estado en el JSON) que corre justo antes de
+    run_final_abmx_config()."""
+    if is_step_completed("reinstall_goss"):
+        print("[=] Paso 'reinstall_goss' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO 9.5: Limpieza y Reinstalacion de Goss ---")
+
+    print("[*] Limpiando archivos goss anteriores...")
+    run_command("rm -f goss*", check=False)
+
+    print("[*] Instalando Goss de forma automatizada...")
+    goss_install_cmd = "curl -fsSL https://goss.rocks/install | sudo sh"
+    run_interactive(goss_install_cmd)
+
+    print("[✓] Goss reinstalado exitosamente.")
+    mark_step_completed("reinstall_goss")
+
 def run_final_abmx_config():
     if is_step_completed("run_final_abmx_config"):
         print("[=] Paso 'run_final_abmx_config' ya fue ejecutado previamente. Omitiendo...")
@@ -726,13 +771,6 @@ def run_final_abmx_config():
         raise RuntimeError("No se encontro la IP en la configuracion. Asegurate de correr 'set_ID' primero.")
 
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-
-    print("[*] Limpiando archivos goss anteriores...")
-    run_command("rm -f goss*", check=False)
-
-    print("[*] Instalando Goss de forma automatizada...")
-    goss_install_cmd = "curl -fsSL https://goss.rocks/install | sudo sh"
-    run_interactive(goss_install_cmd)
 
     print("[*] Corrigiendo ownership de /home/testusr/.local...")
     fix_local_dir_cmd = f"sudo chown -R {sudo_user}:{sudo_user} /home/{sudo_user}/.local"
@@ -810,6 +848,9 @@ def run_final_abmx_config():
             break
 
     child_ansible.close()
+
+    print("[*] Reactivando sudo de forma automatica tras salir del mirror...")
+    _activate_sudo()
 
     if not play_recap_detected or child_ansible.exitstatus != 0:
         print_ascii_fail()
@@ -1968,6 +2009,11 @@ def end_config_reboot():
     log_final_summary()
 
 if __name__ == "__main__":
+    print("[*] Activando sudo de forma automatica...")
+    if _activate_sudo():
+        print("[✓] Sudo activado correctamente.")
+    else:
+        print("[!] No se pudo confirmar la activacion inicial de sudo.")
     set_ID()
     set_network()
     gitconfig_cookie()
@@ -1979,6 +2025,7 @@ if __name__ == "__main__":
     provisional_dhcp()
     network_plan()
     force_test_network_selection()
+    reinstall_goss()
     run_final_abmx_config()
     create_networkmanager_symlink()
     juniper_config()
