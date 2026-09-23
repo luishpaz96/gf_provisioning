@@ -604,60 +604,135 @@ def setup_nomachine_yaml():
     print(f"[✓] Archivo {yaml_path} actualizado exitosamente.")
     mark_step_completed("setup_nomachine_yaml", {"nomachine_url": nomachine_url})
 
-def ensure_apt_mirror_ready(max_retries=5, base_delay=10, connect_timeout=15):
-    """Pre-flight check ANTES de correr el playbook de Ansible.
+# Mirrors candidatos a probar, en orden. El primero es el que ya usaba el
+# sistema; el resto son mirrors publicos alternativos y confiables para
+# Ubuntu 22.04 (jammy). Si tu org tiene un mirror interno/propio, ponlo
+# primero en esta lista.
+APT_CANDIDATE_MIRRORS = [
+    "http://us.archive.ubuntu.com/ubuntu/",
+    "http://archive.ubuntu.com/ubuntu/",
+    "http://mirrors.edge.kernel.org/ubuntu/",
+    "http://mirror.math.princeton.edu/pub/ubuntu/",
+    "http://azure.archive.ubuntu.com/ubuntu/",
+]
 
-    El playbook incluye una tarea de 'apt-get dist-upgrade' contra
-    us.archive.ubuntu.com. Ese mirror a veces devuelve 403 Forbidden o
-    corta la conexion (connection reset) de forma transitoria, lo cual
-    tumba toda la tarea de Ansible (que solo tiene 1 intento) y por lo
-    tanto todo el Paso 8.
+APT_SOURCES_FILE = "/etc/apt/sources.list"
+APT_SOURCES_BACKUP = "/etc/apt/sources.list.bak-provisioning"
 
-    Esta funcion:
-      1. Verifica que el mirror responda (HTTP HEAD) antes de continuar.
-      2. Corre 'apt-get update' con reintentos y backoff exponencial,
-         lo cual refresca los indices/Release files y en la practica
-         resuelve la mayoria de los 403 causados por metadata desactualizada.
 
-    Si tras 'max_retries' intentos el mirror sigue sin responder o
-    'apt-get update' sigue fallando, se aborta ANTES de invocar Ansible
-    con un mensaje claro, en vez de dejar que falle a mitad del playbook.
+def _probe_mirror(mirror_url, connect_timeout=15):
+    """HEAD request rapido para saber si el mirror responde antes de
+    perder tiempo reescribiendo sources.list y corriendo apt."""
+    probe = subprocess.run(
+        f'curl -s -o /dev/null -w "%{{http_code}}" --max-time {connect_timeout} {mirror_url}',
+        shell=True, capture_output=True, text=True
+    )
+    http_code = probe.stdout.strip()
+    return probe.returncode == 0 and http_code.startswith(("2", "3")), http_code
+
+
+def _backup_sources_list_once():
+    if not os.path.exists(APT_SOURCES_BACKUP):
+        subprocess.run(f"sudo cp {APT_SOURCES_FILE} {APT_SOURCES_BACKUP}", shell=True, check=False)
+
+
+def _restore_sources_list():
+    if os.path.exists(APT_SOURCES_BACKUP):
+        subprocess.run(f"sudo cp {APT_SOURCES_BACKUP} {APT_SOURCES_FILE}", shell=True, check=False)
+
+
+def _point_sources_list_to_mirror(mirror_url):
+    """Reemplaza cualquier host de archive.ubuntu.com en sources.list por
+    el mirror dado, para que TANTO este pre-flight como la tarea de
+    Ansible que viene despues (que lee el mismo sources.list) usen el
+    mismo mirror que ya comprobamos que funciona."""
+    sed_cmd = (
+        r"sudo sed -i -E "
+        r"'s#https?://[a-zA-Z0-9.-]+/ubuntu/#" + mirror_url.replace("/", r"\/") + r"#g' "
+        + APT_SOURCES_FILE
+    )
+    subprocess.run(sed_cmd, shell=True, check=False)
+
+
+def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_timeout=15):
+    """Pre-flight ANTES de correr el playbook de Ansible.
+
+    El playbook incluye una tarea de 'apt-get dist-upgrade' contra el
+    mirror de Ubuntu configurado. Ese mirror a veces devuelve 403 Forbidden
+    o corta la conexion (connection reset) de forma transitoria, lo cual
+    tumba la tarea de Ansible (que solo tiene 1 intento) y con ella todo
+    el Paso 8.
+
+    Esta funcion corre el update/upgrade DE VERDAD, aqui, en Python, antes
+    de invocar Ansible:
+      1. Prueba cada mirror en APT_CANDIDATE_MIRRORS hasta encontrar uno
+         que responda.
+      2. Apunta sources.list a ese mirror.
+      3. Corre 'apt-get update' y 'apt-get dist-upgrade -y' reales, con
+         reintentos y backoff por mirror.
+      4. Si un mirror falla tras sus reintentos, prueba el siguiente.
+      5. Si TODOS los mirrors fallan, restaura el sources.list original y
+         aborta ANTES de invocar Ansible, en vez de dejar que falle a
+         mitad del playbook.
+
+    Si tiene exito, el sistema queda ya actualizado y sources.list
+    apuntando al mirror que funciono -- por lo que cuando Ansible llegue
+    a su propia tarea de 'apt-get dist-upgrade', no habra nada pendiente
+    que descargar (o sera minimo), y usara el mismo mirror ya validado.
     """
-    mirror_url = "http://us.archive.ubuntu.com/ubuntu/"
-    update_cmd = "sudo apt-get update"
+    _backup_sources_list_once()
 
-    for attempt in range(1, max_retries + 1):
-        print(f"[*] Verificando disponibilidad del mirror de apt (intento {attempt}/{max_retries})...")
+    for mirror_url in APT_CANDIDATE_MIRRORS:
+        print(f"[*] Probando mirror: {mirror_url}")
+        reachable, http_code = _probe_mirror(mirror_url, connect_timeout)
 
-        probe = subprocess.run(
-            f'curl -s -o /dev/null -w "%{{http_code}}" --max-time {connect_timeout} {mirror_url}',
-            shell=True, capture_output=True, text=True
-        )
-        http_code = probe.stdout.strip()
+        if not reachable:
+            print(f"[!] Mirror no respondio (HTTP '{http_code}'). Probando el siguiente...")
+            continue
 
-        if probe.returncode == 0 and http_code.startswith(("2", "3")):
-            print(f"[✓] Mirror respondio HTTP {http_code}. Refrescando indices de apt...")
-            update_res = subprocess.run(update_cmd, shell=True, capture_output=True, text=True)
+        print(f"[✓] Mirror respondio HTTP {http_code}. Apuntando sources.list a este mirror...")
+        _point_sources_list_to_mirror(mirror_url)
 
-            if update_res.returncode == 0:
-                print("[✓] 'apt-get update' completado correctamente. Mirror listo.")
-                return True
-            else:
+        mirror_ok = False
+        for attempt in range(1, max_retries_per_mirror + 1):
+            print(f"[*] apt-get update (mirror={mirror_url}, intento {attempt}/{max_retries_per_mirror})...")
+            update_res = subprocess.run("sudo apt-get update", shell=True, capture_output=True, text=True)
+
+            if update_res.returncode != 0:
                 print(f"[!] 'apt-get update' fallo (rc={update_res.returncode}). "
                       f"stderr: {update_res.stderr.strip()[:300]}")
-        else:
-            print(f"[!] Mirror no respondio correctamente (HTTP '{http_code}', rc={probe.returncode}).")
+            else:
+                print(f"[*] apt-get dist-upgrade -y (mirror={mirror_url}, intento {attempt}/{max_retries_per_mirror})...")
+                upgrade_res = subprocess.run(
+                    "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y",
+                    shell=True, capture_output=True, text=True
+                )
+                if upgrade_res.returncode == 0:
+                    print(f"[✓] 'apt-get dist-upgrade' completado correctamente con {mirror_url}.")
+                    mirror_ok = True
+                    break
+                else:
+                    print(f"[!] 'apt-get dist-upgrade' fallo (rc={upgrade_res.returncode}). "
+                          f"stderr: {upgrade_res.stderr.strip()[:500]}")
 
-        if attempt < max_retries:
-            delay = base_delay * (2 ** (attempt - 1))  # backoff exponencial: 10s, 20s, 40s, 80s...
-            print(f"[*] Reintentando en {delay}s...")
-            time.sleep(delay)
+            if attempt < max_retries_per_mirror:
+                delay = base_delay * (2 ** (attempt - 1))
+                print(f"[*] Reintentando en {delay}s con el mismo mirror...")
+                time.sleep(delay)
 
+        if mirror_ok:
+            print(f"[✓] Sistema actualizado usando {mirror_url}. Continuando con Ansible.")
+            return True
+
+        print(f"[!] {mirror_url} agoto sus reintentos. Probando el siguiente mirror...")
+
+    _restore_sources_list()
     raise RuntimeError(
-        f"No se pudo confirmar que el mirror de apt ({mirror_url}) este disponible "
-        f"despues de {max_retries} intentos. Abortando ANTES de correr Ansible para "
-        f"evitar una falla a mitad del playbook. Verifica la conectividad de red o "
-        f"considera cambiar de mirror."
+        "No se pudo completar 'apt update && apt dist-upgrade' con ninguno de los "
+        f"mirrors probados ({', '.join(APT_CANDIDATE_MIRRORS)}). Se restauro el "
+        "sources.list original. Abortando ANTES de correr Ansible. Verifica la "
+        "conectividad de red del host o agrega un mirror interno confiable al "
+        "inicio de APT_CANDIDATE_MIRRORS."
     )
 
 
@@ -1884,8 +1959,7 @@ def download_python_tools():
         "UUT_test_case.py",
         "share.py",
         "reboot.py",
-        "U22Tocinos",
-        "service_restart.py"
+        "U22Tocinos"
     ]
     
     destination_dir = "."
