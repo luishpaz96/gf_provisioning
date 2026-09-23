@@ -9,6 +9,7 @@ import time
 import select
 import atexit
 import uuid
+import getpass
 
 # ==============================================================================
 # CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
@@ -67,9 +68,19 @@ atexit.register(log_final_summary)
 # VARIABLES GLOBALES
 # ==============================================================================
 STATE_FILE = "provisioning_state.json"
-SUDO_PASSWORD = "55eed35fba"
+# SUDO_PASSWORD y MIRROR_PASSWORD ya NO viven aqui como texto plano.
+# Se piden interactivamente (una sola vez) en ensure_credentials() y se
+# guardan en STATE_FILE; estas variables globales se llenan en tiempo de
+# ejecucion antes de que cualquier otra funcion las use. VAULT_PASSWORD
+# se queda hardcodeada aqui por decision explicita.
+SUDO_PASSWORD = None
+MIRROR_PASSWORD = None
 VAULT_PASSWORD = r"/!X6i8n0+cxK$v3m4tQ-"
 DEFAULT_NOMACHINE_URL = "https://download.nomachine.com/download/9.8/Linux/nomachine_9.8.2_1_amd64.deb"
+GPG_KEY_IMPORT_CMD = (
+    "wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | "
+    "sudo gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/google-chrome.gpg"
+)
 
 DHCPD_CONF_CONTENT = """# BEGIN ANSIBLE MANAGED BLOCK
 ddns-update-style none;
@@ -213,39 +224,48 @@ fixed-address6 fd00::1F;
 }
 # END ANSIBLE MANAGED BLOCK"""
 
-def print_ascii_fail():
-    red_code = "\033[91m\033[1m"
-    reset_code = "\033[0m"
-    banner = r"""
-================================================================================
+def print_ascii_fail(message="Se detecto un error durante la ejecucion."):
+    """Banner compacto de FALLO (rojo). 'message' describe que fallo
+    especificamente -- esta funcion se usa desde muchos pasos distintos
+    del script (no solo Ansible), asi que el mensaje debe ser generico
+    por default y cada llamada puede pasar contexto especifico."""
+    red = "\033[91m\033[1m"
+    reset = "\033[0m"
+    width = 66
+    print(f"\n{red}┌{'─' * width}┐{reset}")
+    print(f"{red}│{'✗  FALLO'.center(width)}│{reset}")
+    print(f"{red}├{'─' * width}┤{reset}")
+    for line in [message, "Revisa el log de arriba para mas detalle."]:
+        print(f"{red}│ {line[:width-2].ljust(width-2)} │{reset}")
+    print(f"{red}└{'─' * width}┘{reset}\n")
 
-  FFFFFFFFFFFFFFFFFFFFFF     AAA               IIIIIIIIII LLLLLLLLL             
-  F::::::::::::::::::::F    A:::A              I::::::::I L::::::::L            
-  F::::::::::::::::::::F   A:::::A             I::::::::I L::::::::L            
-  FF::::::FFFFFFFFF:::F  A:::::::A            II::::::II LL:::::::LL            
-    F:::::F       FFFFFF A:::::A:::::A            I::::I     L::::L             
-    F:::::F             A:::::A A:::::A           I::::I     L::::L             
-    F::::::FFFFFFFFFF  A:::::A   A:::::A          I::::I     L::::L             
-    F:::::::::::::::F A:::::A     A:::::A         I::::I     L::::L             
-    F::::::FFFFFFFFFF A:::::AAAAAAAAA:::::A        I::::I     L::::L             
-    F:::::F          A::::::::::::::::::::A       I::::I     L::::L             
-    F:::::F         A:::::AAAAAAAAAAAAA:::::A      I::::I     L::::L             
-    F:::::F        A:::::A             A:::::A     I::::I     L::::L      FFFFFF 
-  FF:::::::FF     A:::::A               A:::::A  II::::::II LL:::::::LLLLLL::::L 
-  F::::::::F     A:::::A                 A:::::A I::::::::I L::::::::::::::::::L 
-  F::::::::F    A:::::A                   A:::::AI::::::::I L::::::::::::::::::L 
-  FFFFFFFFFF   AAAAAAA                     AAAAAAAIIIIIIIIIILLLLLLLLLLLLLLLLLLLL 
+def print_ascii_pass(message="Mirror de apt + Ansible Playbook: OK."):
+    """Banner compacto de EXITO (verde). Se usa tras confirmar que tanto
+    el pre-flight de apt/mirror como el ansible-playbook terminaron sin
+    tareas fallidas."""
+    green = "\033[92m\033[1m"
+    reset = "\033[0m"
+    width = 66
+    print(f"\n{green}┌{'─' * width}┐{reset}")
+    print(f"{green}│{'✓  OK'.center(width)}│{reset}")
+    print(f"{green}├{'─' * width}┤{reset}")
+    print(f"{green}│ {message[:width-2].ljust(width-2)} │{reset}")
+    print(f"{green}└{'─' * width}┘{reset}\n")
 
-================================================================================
-    """
-    print(f"{red_code}{banner}{reset_code}")
-    print(f"{red_code}[!] ATENCION OPERADOR: Ansible reporto tareas FALLIDAS (failed > 0).{reset_code}")
-    print(f"{red_code}[!] Por favor, revisa el log superior para hacer debug.{reset_code}\n")
+_state_perms_fixed = False
 
 def fix_state_file_permissions():
+    """Corrige el ownership de STATE_FILE. Se cachea con un flag global para
+    correr el 'sudo chown' una sola vez por ejecucion del script en vez de
+    en cada load_state()/save_state() (que se llaman decenas de veces),
+    evitando spawnear un subprocess+shell innecesario en cada uno."""
+    global _state_perms_fixed
+    if _state_perms_fixed:
+        return
     if os.path.exists(STATE_FILE):
         sudo_user = os.environ.get('SUDO_USER', 'testusr')
         subprocess.run(f"sudo chown {sudo_user}:{sudo_user} {STATE_FILE}", shell=True, stderr=subprocess.DEVNULL)
+        _state_perms_fixed = True
 
 def load_state():
     fix_state_file_permissions()
@@ -271,6 +291,66 @@ def mark_step_completed(step_name, extra_config=None):
     save_state(state)
     print(f"[✓] Paso '{step_name}' completado y registrado en {STATE_FILE}.")
 
+def _prompt_password_twice(label):
+    """Pide una contraseña dos veces (input oculto via getpass) hasta que
+    ambas coincidan y no esten vacias. Se usa para no dejar contrasenas
+    hardcodeadas en el codigo fuente."""
+    while True:
+        p1 = getpass.getpass(f"Ingresa la contraseña de {label}: ")
+        if not p1:
+            print("[!] La contraseña no puede estar vacia. Intenta de nuevo.\n")
+            continue
+        p2 = getpass.getpass(f"Confirma la contraseña de {label}: ")
+        if p1 != p2:
+            print("[!] Las contraseñas no coinciden. Intenta de nuevo.\n")
+            continue
+        return p1
+
+def ensure_credentials():
+    """Se llama SIEMPRE como lo primero al arrancar el script (antes de
+    _activate_sudo() y de cualquier otro paso). La primera vez que se
+    corre el script en un equipo, pide interactivamente la contrasena de
+    sudo y la del usuario 'testusr' en el Git-Mirror, cada una dos veces
+    para validar que coincidan, y las guarda en STATE_FILE. En corridas
+    posteriores (o tras un reinicio a mitad del provisioning) las lee
+    directo del state file sin volver a preguntar.
+
+    VAULT_PASSWORD se queda hardcodeada en el codigo por decision
+    explicita -- esta funcion no la toca.
+    """
+    global SUDO_PASSWORD, MIRROR_PASSWORD
+
+    state = load_state()
+    creds = state.get("config", {}).get("_credentials", {})
+    stored_sudo = creds.get("sudo_password")
+    stored_mirror = creds.get("mirror_password")
+
+    if stored_sudo and stored_mirror:
+        SUDO_PASSWORD = stored_sudo
+        MIRROR_PASSWORD = stored_mirror
+        print("[=] Credenciales ya configuradas previamente. Cargando desde el state file...")
+        return
+
+    print("--- Configuracion inicial de credenciales ---")
+    print("Esto solo se pide una vez por equipo; quedan guardadas en el state file")
+    print("para esta y futuras ejecuciones (incluidos los reinicios a mitad del proceso).\n")
+
+    SUDO_PASSWORD = stored_sudo or _prompt_password_twice("sudo (usuario local del equipo)")
+    MIRROR_PASSWORD = stored_mirror or _prompt_password_twice("del usuario 'testusr' en el Git-Mirror (172.24.125.2)")
+
+    state = load_state()
+    state.setdefault("config", {})["_credentials"] = {
+        "sudo_password": SUDO_PASSWORD,
+        "mirror_password": MIRROR_PASSWORD,
+    }
+    save_state(state)
+
+    # El state file ahora contiene contrasenas en texto plano: restringimos
+    # su lectura al dueno del archivo como mitigacion minima.
+    subprocess.run(f"sudo chmod 600 {STATE_FILE}", shell=True, check=False)
+
+    print(f"[✓] Credenciales guardadas en {STATE_FILE} (permisos restringidos a 600).\n")
+
 def _activate_sudo():
     """Activa (o refresca) las credenciales de sudo en cache de forma NO
     interactiva, usando SUDO_PASSWORD via 'sudo -S -v'. Se llama solo en
@@ -294,9 +374,15 @@ def _activate_sudo():
 
 def run_command(cmd, check=True):
     print(f"[CMD] {cmd}")
-    res = subprocess.run(cmd, shell=True)
+    res = subprocess.run(cmd, shell=True, stderr=subprocess.PIPE, text=True)
+    if res.stderr:
+        # El stdout del comando sigue heredando la terminal en vivo (como antes);
+        # el stderr lo capturamos para poder reportarlo si el comando falla, y lo
+        # reflejamos aqui para no perder warnings aunque el comando no falle.
+        sys.stderr.write(res.stderr)
     if check and res.returncode != 0:
-        raise RuntimeError(f"Error ejecutando comando: {cmd}")
+        err_detail = res.stderr.strip() if res.stderr else "(sin salida en stderr)"
+        raise RuntimeError(f"Error ejecutando comando: {cmd} (rc={res.returncode}). stderr: {err_detail}")
     return res.returncode
 
 def run_interactive(cmd, timeout=3600):
@@ -324,6 +410,24 @@ def run_interactive(cmd, timeout=3600):
     if child.exitstatus != 0:
         raise RuntimeError(f"Error en comando interactivo: {cmd} (Exit code: {child.exitstatus})")
     return child.exitstatus
+
+def _retry_download(fn, description, max_retries=3, base_delay=10):
+    """Reintenta con backoff exponencial una operacion de descarga/red
+    (SCP, wget, etc.) que puede fallar de forma transitoria. 'fn' es un
+    callable sin argumentos (usar lambda o functools.partial) que debe
+    levantar una excepcion si la descarga fallo."""
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            print(f"[!] Intento {attempt}/{max_retries} de '{description}' fallo: {e}")
+            if attempt < max_retries:
+                delay = base_delay * (2 ** (attempt - 1))
+                print(f"[*] Reintentando '{description}' en {delay}s...")
+                time.sleep(delay)
+    raise RuntimeError(f"'{description}' fallo tras {max_retries} intentos. Ultimo error: {last_exc}")
 
 def set_ID():
     if is_step_completed("set_ID"):
@@ -376,15 +480,12 @@ def set_network():
     run_interactive(nmcli_cmd)
 
     print("[*] Verificando e importando llaves GPG faltantes para apt...")
-    run_interactive(
-        "wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/google-chrome.gpg"
-    )
+    _retry_download(lambda: run_interactive(GPG_KEY_IMPORT_CMD), "descarga de llave GPG de Google")
 
-    run_interactive("sudo apt update")
-    run_interactive("sudo apt-get update")
-
-    pkgs_cmd = "sudo apt install openssh-server net-tools git sssd sssd-tools libpam-sss libnss-sss python3-pip -y"
-    run_interactive(pkgs_cmd)
+    apt_install([
+        "openssh-server", "net-tools", "git", "sssd", "sssd-tools",
+        "libpam-sss", "libnss-sss", "python3-pip",
+    ])
 
     print("[*] Instalando dependencias iniciales de pip3...")
     run_interactive("sudo pip3 install colorlog jsonpickle google.cloud --upgrade")
@@ -403,9 +504,8 @@ def set_network():
 
     mark_step_completed("set_network")
 
-def run_scp_from_mirror(remote_path, local_destination):
+def _run_scp_from_mirror_once(remote_path, local_destination):
     mirror_ip = "172.24.125.2"
-    mirror_pass = "google123"
     cmd = f"scp testusr@{mirror_ip}:{remote_path} {local_destination}"
     print(f"[CMD] Copiando desde Mirror: {cmd}")
 
@@ -422,7 +522,7 @@ def run_scp_from_mirror(remote_path, local_destination):
         if idx == 0:
             child.sendline("yes")
         elif idx == 1:
-            child.sendline(mirror_pass)
+            child.sendline(MIRROR_PASSWORD)
         elif idx == 2:
             break
         elif idx == 3:
@@ -432,6 +532,14 @@ def run_scp_from_mirror(remote_path, local_destination):
     child.close()
     if child.exitstatus != 0:
         raise RuntimeError(f"Error transfiriendo {remote_path} desde el Git Mirror.")
+
+def run_scp_from_mirror(remote_path, local_destination):
+    """Wrapper con reintentos (backoff exponencial) sobre la copia SCP real,
+    para tolerar caidas transitorias de red hacia el Git-Mirror."""
+    _retry_download(
+        lambda: _run_scp_from_mirror_once(remote_path, local_destination),
+        f"SCP de {remote_path} desde el Git-Mirror"
+    )
 
 def gitconfig_cookie():
     if is_step_completed("gitconfig_cookie"):
@@ -643,9 +751,9 @@ def _restore_sources_list():
 
 def _point_sources_list_to_mirror(mirror_url):
     """Reemplaza cualquier host de archive.ubuntu.com en sources.list por
-    el mirror dado, para que TANTO este pre-flight como la tarea de
-    Ansible que viene despues (que lee el mismo sources.list) usen el
-    mismo mirror que ya comprobamos que funciona."""
+    el mirror dado, para que cualquier llamada posterior a apt (incluida
+    la de Ansible, que lee el mismo sources.list) use el mismo mirror que
+    ya comprobamos que funciona."""
     sed_cmd = (
         r"sudo sed -i -E "
         r"'s#https?://[a-zA-Z0-9.-]+/ubuntu/#" + mirror_url.replace("/", r"\/") + r"#g' "
@@ -654,31 +762,21 @@ def _point_sources_list_to_mirror(mirror_url):
     subprocess.run(sed_cmd, shell=True, check=False)
 
 
-def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_timeout=15):
-    """Pre-flight ANTES de correr el playbook de Ansible.
+def _apt_with_mirror_fallback(apt_command, description, max_retries_per_mirror=2,
+                               base_delay=10, connect_timeout=15):
+    """Nucleo generico de 'ejecutar un comando de apt probando varios mirrors
+    con reintentos'. Usado tanto por apt_update()/apt_install() (para
+    cualquier paso del script que necesite instalar paquetes) como por
+    ensure_apt_mirror_ready() (el pre-flight especifico del dist-upgrade
+    antes de Ansible).
 
-    El playbook incluye una tarea de 'apt-get dist-upgrade' contra el
-    mirror de Ubuntu configurado. Ese mirror a veces devuelve 403 Forbidden
-    o corta la conexion (connection reset) de forma transitoria, lo cual
-    tumba la tarea de Ansible (que solo tiene 1 intento) y con ella todo
-    el Paso 8.
+    Siempre corre 'apt-get update' primero contra el mirror que se este
+    probando, y luego 'apt_command'. Si cualquiera de los dos falla, se
+    reintenta (backoff exponencial) y, si se agotan los reintentos, se
+    prueba el siguiente mirror de APT_CANDIDATE_MIRRORS.
 
-    Esta funcion corre el update/upgrade DE VERDAD, aqui, en Python, antes
-    de invocar Ansible:
-      1. Prueba cada mirror en APT_CANDIDATE_MIRRORS hasta encontrar uno
-         que responda.
-      2. Apunta sources.list a ese mirror.
-      3. Corre 'apt-get update' y 'apt-get dist-upgrade -y' reales, con
-         reintentos y backoff por mirror.
-      4. Si un mirror falla tras sus reintentos, prueba el siguiente.
-      5. Si TODOS los mirrors fallan, restaura el sources.list original y
-         aborta ANTES de invocar Ansible, en vez de dejar que falle a
-         mitad del playbook.
-
-    Si tiene exito, el sistema queda ya actualizado y sources.list
-    apuntando al mirror que funciono -- por lo que cuando Ansible llegue
-    a su propia tarea de 'apt-get dist-upgrade', no habra nada pendiente
-    que descargar (o sera minimo), y usara el mismo mirror ya validado.
+    Devuelve el mirror_url que funciono. Lanza RuntimeError si todos los
+    mirrors fallan (y en ese caso restaura el sources.list original).
     """
     _backup_sources_list_once()
 
@@ -693,7 +791,6 @@ def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_tim
         print(f"[✓] Mirror respondio HTTP {http_code}. Apuntando sources.list a este mirror...")
         _point_sources_list_to_mirror(mirror_url)
 
-        mirror_ok = False
         for attempt in range(1, max_retries_per_mirror + 1):
             print(f"[*] apt-get update (mirror={mirror_url}, intento {attempt}/{max_retries_per_mirror})...")
             update_res = subprocess.run("sudo apt-get update", shell=True, capture_output=True, text=True)
@@ -702,38 +799,92 @@ def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_tim
                 print(f"[!] 'apt-get update' fallo (rc={update_res.returncode}). "
                       f"stderr: {update_res.stderr.strip()[:300]}")
             else:
-                print(f"[*] apt-get dist-upgrade -y (mirror={mirror_url}, intento {attempt}/{max_retries_per_mirror})...")
-                upgrade_res = subprocess.run(
-                    "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y",
-                    shell=True, capture_output=True, text=True
-                )
-                if upgrade_res.returncode == 0:
-                    print(f"[✓] 'apt-get dist-upgrade' completado correctamente con {mirror_url}.")
-                    mirror_ok = True
-                    break
+                print(f"[*] {description} (mirror={mirror_url}, intento {attempt}/{max_retries_per_mirror})...")
+                cmd_res = subprocess.run(apt_command, shell=True, capture_output=True, text=True)
+                if cmd_res.returncode == 0:
+                    print(f"[✓] '{description}' completado correctamente con {mirror_url}.")
+                    return mirror_url
                 else:
-                    print(f"[!] 'apt-get dist-upgrade' fallo (rc={upgrade_res.returncode}). "
-                          f"stderr: {upgrade_res.stderr.strip()[:500]}")
+                    print(f"[!] '{description}' fallo (rc={cmd_res.returncode}). "
+                          f"stderr: {cmd_res.stderr.strip()[:500]}")
 
             if attempt < max_retries_per_mirror:
                 delay = base_delay * (2 ** (attempt - 1))
                 print(f"[*] Reintentando en {delay}s con el mismo mirror...")
                 time.sleep(delay)
 
-        if mirror_ok:
-            print(f"[✓] Sistema actualizado usando {mirror_url}. Continuando con Ansible.")
-            return True
-
-        print(f"[!] {mirror_url} agoto sus reintentos. Probando el siguiente mirror...")
+        print(f"[!] {mirror_url} agoto sus reintentos para '{description}'. Probando el siguiente mirror...")
 
     _restore_sources_list()
     raise RuntimeError(
-        "No se pudo completar 'apt update && apt dist-upgrade' con ninguno de los "
-        f"mirrors probados ({', '.join(APT_CANDIDATE_MIRRORS)}). Se restauro el "
-        "sources.list original. Abortando ANTES de correr Ansible. Verifica la "
-        "conectividad de red del host o agrega un mirror interno confiable al "
-        "inicio de APT_CANDIDATE_MIRRORS."
+        f"No se pudo completar '{description}' con ninguno de los mirrors probados "
+        f"({', '.join(APT_CANDIDATE_MIRRORS)}). Se restauro el sources.list original. "
+        f"Verifica la conectividad de red del host o agrega un mirror interno "
+        f"confiable al inicio de APT_CANDIDATE_MIRRORS."
     )
+
+
+def apt_update():
+    """'apt-get update' con fallback automatico entre mirrors. Usar SIEMPRE
+    en vez de 'run_interactive(\"sudo apt update\")' / 'sudo apt-get update'
+    sueltos, para que un mirror caido no tumbe el paso completo."""
+    return _apt_with_mirror_fallback("true", "apt-get update")
+
+
+def apt_install(pkgs, update=True):
+    """Instala uno o mas paquetes con fallback automatico entre mirrors y
+    reintentos. 'pkgs' puede ser un string ('git curl') o una lista
+    (['git', 'curl']). Usar SIEMPRE en vez de 'run_interactive(\"sudo apt
+    install -y ...\")' suelto en cualquier paso del script.
+
+    Con update=True (default) corre 'apt-get update' contra el mismo
+    mirror antes de instalar, en la misma pasada (necesario, por ejemplo,
+    justo despues de agregar un repo nuevo como el de Chrome).
+    """
+    pkgs_str = pkgs if isinstance(pkgs, str) else " ".join(pkgs)
+    install_cmd = f"sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {pkgs_str}"
+
+    if update:
+        return _apt_with_mirror_fallback(install_cmd, f"apt-get install -y {pkgs_str}")
+
+    # Sin update explicito: solo probamos el mirror ya configurado (el que
+    # haya quedado de una llamada previa a apt_update()/apt_install()) y
+    # corremos el install directo, con reintentos simples.
+    for attempt in range(1, 3):
+        res = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
+        if res.returncode == 0:
+            print(f"[✓] apt-get install -y {pkgs_str} completado.")
+            return True
+        print(f"[!] Intento {attempt}/2 de 'apt-get install -y {pkgs_str}' fallo: "
+              f"{res.stderr.strip()[:300]}")
+        time.sleep(10)
+    raise RuntimeError(f"No se pudo instalar {pkgs_str} tras 2 intentos (update=False).")
+
+
+def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_timeout=15):
+    """Pre-flight ANTES de correr el playbook de Ansible.
+
+    El playbook incluye una tarea de 'apt-get dist-upgrade' contra el
+    mirror de Ubuntu configurado. Ese mirror a veces devuelve 403 Forbidden
+    o corta la conexion (connection reset) de forma transitoria, lo cual
+    tumba la tarea de Ansible (que solo tiene 1 intento) y con ella todo
+    el Paso 8.
+
+    Corre el dist-upgrade DE VERDAD, aqui, en Python, antes de invocar
+    Ansible, probando mirrors alternos si el actual falla (ver
+    _apt_with_mirror_fallback). Si tiene exito, el sistema queda ya
+    actualizado y cuando Ansible llegue a su propia tarea de
+    'apt-get dist-upgrade' no habra nada pendiente que descargar (o sera
+    minimo), usando el mismo mirror ya validado.
+    """
+    _apt_with_mirror_fallback(
+        "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y",
+        "apt-get dist-upgrade -y",
+        max_retries_per_mirror=max_retries_per_mirror,
+        base_delay=base_delay,
+        connect_timeout=connect_timeout,
+    )
+    return True
 
 
 def run_ansible_playbook():
@@ -833,12 +984,14 @@ def run_ansible_playbook():
     if failed_match:
         failed_count = int(failed_match.group(1))
         if failed_count > 0:
-            print_ascii_fail()
+            print_ascii_fail(f"Ansible reporto {failed_count} tarea(s) fallida(s) (failed > 0).")
             raise RuntimeError(f"Ansible Playbook finalizo con {failed_count} tarea(s) fallida(s).")
 
     if child.exitstatus != 0:
-        print_ascii_fail()
+        print_ascii_fail("Error en ejecucion de ansible-playbook.")
         raise RuntimeError(f"Error en ejecucion de ansible-playbook (Exit code: {child.exitstatus})")
+
+    print_ascii_pass()
 
     print("[*] Aplicando downgrade de setuptools POST-Ansible...")
     run_interactive(downgrade_cmd)
@@ -912,7 +1065,6 @@ def run_final_abmx_config():
     run_interactive(fix_local_dir_cmd)
 
     mirror_ip = "172.24.125.2"
-    mirror_pass = "google123"
 
     ssh_copy_cmd = f"ssh-copy-id -i ~/.ssh/id_rsa.pub {sudo_user}@{ip_address}"
     cmd_remote_copy = f"ssh {sudo_user}@{mirror_ip} '{ssh_copy_cmd}'"
@@ -933,7 +1085,7 @@ def run_final_abmx_config():
         if idx == 0:
             child_copy.sendline("yes")
         elif idx in (1, 2):
-            child_copy.sendline(mirror_pass)
+            child_copy.sendline(MIRROR_PASSWORD)
         elif idx == 3:
             break
         elif idx == 4:
@@ -971,7 +1123,7 @@ def run_final_abmx_config():
         if idx == 0:
             child_ansible.sendline("yes")
         elif idx == 1:
-            child_ansible.sendline(mirror_pass)
+            child_ansible.sendline(MIRROR_PASSWORD)
         elif idx in (2, 3, 4, 6, 7):
             child_ansible.sendline(SUDO_PASSWORD)
         elif idx == 5:
@@ -1007,8 +1159,7 @@ def create_networkmanager_symlink():
     run_command(f"ls -l {target_dir}/*etwork*", check=False)
 
     print("[*] Actualizando lista de paquetes e instalando libsss-sudo y gnome-control-center...")
-    apt_cmd = "sudo apt update && sudo apt install -y libsss-sudo gnome-control-center"
-    run_interactive(apt_cmd)
+    apt_install(["libsss-sudo", "gnome-control-center"])
 
     print("[*] Creando symlink para network-manager.service...")
     symlink_cmd = f"sudo ln -sf {target_dir}/NetworkManager.service {target_dir}/network-manager.service"
@@ -1750,11 +1901,7 @@ def zpe_config():
 
     _print_green_banner("CONFIGURACION DEL ZPE COMPLETADA EXITOSAMENTE.")
     
-def _scp_download(remote_user, remote_host, remote_path, destination="."):
-    """Descarga (recursivamente) 'remote_path' desde 'remote_user@remote_host' hacia
-    'destination' via scp, manejando el prompt de huella SSH y de contrasena
-    (se usa SUDO_PASSWORD, siguiendo la misma convencion que run_scp_from_mirror
-    y download_python_tools)."""
+def _scp_download_once(remote_user, remote_host, remote_path, destination="."):
     cmd = f"scp -r {remote_user}@{remote_host}:{remote_path} {destination}"
     print(f"[CMD Interactive] {cmd}")
 
@@ -1777,15 +1924,29 @@ def _scp_download(remote_user, remote_host, remote_path, destination="."):
             break
         elif idx == 3:
             child.close(force=True)
-            print_ascii_fail()
             raise RuntimeError(f"Timeout copiando '{remote_path}' desde {remote_host}.")
 
     child.close()
     if child.exitstatus != 0:
-        print_ascii_fail()
         raise RuntimeError(
             f"Error copiando '{remote_path}' desde {remote_host} (Exit code: {child.exitstatus})."
         )
+
+def _scp_download(remote_user, remote_host, remote_path, destination="."):
+    """Descarga (recursivamente) 'remote_path' desde 'remote_user@remote_host' hacia
+    'destination' via scp, manejando el prompt de huella SSH y de contrasena
+    (se usa SUDO_PASSWORD, siguiendo la misma convencion que run_scp_from_mirror
+    y download_python_tools). Con reintentos (backoff exponencial) ante fallos
+    transitorios de red; el banner de FALLO solo se muestra si se agotan
+    todos los intentos."""
+    try:
+        _retry_download(
+            lambda: _scp_download_once(remote_user, remote_host, remote_path, destination),
+            f"SCP de '{remote_path}' desde {remote_host}"
+        )
+    except RuntimeError:
+        print_ascii_fail(f"No se pudo copiar '{remote_path}' desde {remote_host}.")
+        raise
 
 def _run_shell_sequence(commands, timeout=600):
     """Ejecuta 'commands' UNO POR UNO (sin encadenarlos con '&&' en una sola linea)
@@ -1967,42 +2128,48 @@ def download_python_tools():
     for filename in files_to_download:
         remote_path = f"{remote_user}@{remote_host}:/home/{remote_user}/{filename}"
         cmd = f"scp {remote_path} {destination_dir}/"
-        
-        print(f"[*] Descargando {filename} por SCP...")
-        print(f"[CMD Interactive] {cmd}")
-        
-        child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=None)
-        
-        class PexpectLogger:
-            def write(self, text):
-                sys.stdout.write(text)
-                sys.stdout.flush()
-            def flush(self):
-                sys.stdout.flush()
-        
-        child.logfile_read = PexpectLogger()
 
-        while True:
-            idx = child.expect([
-                r"Are you sure you want to continue connecting",
-                r"password:",
-                pexpect.EOF
-            ], timeout=None)
+        def _download_once(filename=filename, cmd=cmd):
+            print(f"[*] Descargando {filename} por SCP...")
+            print(f"[CMD Interactive] {cmd}")
 
-            if idx == 0:
-                print("\n[*] Detectado prompt de huella SSH. Enviando 'yes'...")
-                child.sendline("yes")
-            elif idx == 1:
-                print("\n[*] Ingresando contraseña para SCP...")
-                child.sendline(SUDO_PASSWORD)
-            elif idx == 2:
-                break
+            child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=None)
 
-        child.close()
+            class PexpectLogger:
+                def write(self, text):
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                def flush(self):
+                    sys.stdout.flush()
 
-        if child.exitstatus != 0:
-            print_ascii_fail()
-            raise RuntimeError(f"Error descargando {filename} por SCP (Exit code: {child.exitstatus})")
+            child.logfile_read = PexpectLogger()
+
+            while True:
+                idx = child.expect([
+                    r"Are you sure you want to continue connecting",
+                    r"password:",
+                    pexpect.EOF
+                ], timeout=None)
+
+                if idx == 0:
+                    print("\n[*] Detectado prompt de huella SSH. Enviando 'yes'...")
+                    child.sendline("yes")
+                elif idx == 1:
+                    print("\n[*] Ingresando contraseña para SCP...")
+                    child.sendline(SUDO_PASSWORD)
+                elif idx == 2:
+                    break
+
+            child.close()
+
+            if child.exitstatus != 0:
+                raise RuntimeError(f"Error descargando {filename} por SCP (Exit code: {child.exitstatus})")
+
+        try:
+            _retry_download(_download_once, f"descarga de {filename} por SCP")
+        except RuntimeError:
+            print_ascii_fail(f"No se pudo descargar {filename} por SCP tras varios intentos.")
+            raise
 
     print("[✓] Todas las herramientas fueron descargadas exitosamente.")
     mark_step_completed("download_python_tools")
@@ -2026,19 +2193,14 @@ def fix_chrome():
     run_command("sudo rm -rf ~/.cache/google-chrome", check=False)
 
     print("[*] Descargando e instalando nuevamente la llave GPG oficial de Google...")
-    run_interactive(
-        "wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/google-chrome.gpg"
-    )
+    _retry_download(lambda: run_interactive(GPG_KEY_IMPORT_CMD), "descarga de llave GPG de Google")
 
     print("[*] Configurando el repositorio oficial de Google Chrome...")
     repo_cmd = 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list'
     run_interactive(repo_cmd)
 
-    print("[*] Actualizando listas de paquetes de apt...")
-    run_interactive("sudo apt-get update")
-
-    print("[*] Instalando Google Chrome Stable...")
-    run_interactive("sudo apt-get install google-chrome-stable -y")
+    print("[*] Actualizando listas de paquetes de apt e instalando Google Chrome Stable...")
+    apt_install(["google-chrome-stable"])
 
     print("[✓] Google Chrome ha sido eliminado y reinstalado exitosamente.")
     mark_step_completed("fix_chrome")
@@ -2156,6 +2318,7 @@ def end_config_reboot():
     log_final_summary()
 
 if __name__ == "__main__":
+    ensure_credentials()
     print("[*] Activando sudo de forma automatica...")
     if _activate_sudo():
         print("[✓] Sudo activado correctamente.")
