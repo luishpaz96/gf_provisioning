@@ -604,6 +604,63 @@ def setup_nomachine_yaml():
     print(f"[✓] Archivo {yaml_path} actualizado exitosamente.")
     mark_step_completed("setup_nomachine_yaml", {"nomachine_url": nomachine_url})
 
+def ensure_apt_mirror_ready(max_retries=5, base_delay=10, connect_timeout=15):
+    """Pre-flight check ANTES de correr el playbook de Ansible.
+
+    El playbook incluye una tarea de 'apt-get dist-upgrade' contra
+    us.archive.ubuntu.com. Ese mirror a veces devuelve 403 Forbidden o
+    corta la conexion (connection reset) de forma transitoria, lo cual
+    tumba toda la tarea de Ansible (que solo tiene 1 intento) y por lo
+    tanto todo el Paso 8.
+
+    Esta funcion:
+      1. Verifica que el mirror responda (HTTP HEAD) antes de continuar.
+      2. Corre 'apt-get update' con reintentos y backoff exponencial,
+         lo cual refresca los indices/Release files y en la practica
+         resuelve la mayoria de los 403 causados por metadata desactualizada.
+
+    Si tras 'max_retries' intentos el mirror sigue sin responder o
+    'apt-get update' sigue fallando, se aborta ANTES de invocar Ansible
+    con un mensaje claro, en vez de dejar que falle a mitad del playbook.
+    """
+    mirror_url = "http://us.archive.ubuntu.com/ubuntu/"
+    update_cmd = "sudo apt-get update"
+
+    for attempt in range(1, max_retries + 1):
+        print(f"[*] Verificando disponibilidad del mirror de apt (intento {attempt}/{max_retries})...")
+
+        probe = subprocess.run(
+            f'curl -s -o /dev/null -w "%{{http_code}}" --max-time {connect_timeout} {mirror_url}',
+            shell=True, capture_output=True, text=True
+        )
+        http_code = probe.stdout.strip()
+
+        if probe.returncode == 0 and http_code.startswith(("2", "3")):
+            print(f"[✓] Mirror respondio HTTP {http_code}. Refrescando indices de apt...")
+            update_res = subprocess.run(update_cmd, shell=True, capture_output=True, text=True)
+
+            if update_res.returncode == 0:
+                print("[✓] 'apt-get update' completado correctamente. Mirror listo.")
+                return True
+            else:
+                print(f"[!] 'apt-get update' fallo (rc={update_res.returncode}). "
+                      f"stderr: {update_res.stderr.strip()[:300]}")
+        else:
+            print(f"[!] Mirror no respondio correctamente (HTTP '{http_code}', rc={probe.returncode}).")
+
+        if attempt < max_retries:
+            delay = base_delay * (2 ** (attempt - 1))  # backoff exponencial: 10s, 20s, 40s, 80s...
+            print(f"[*] Reintentando en {delay}s...")
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"No se pudo confirmar que el mirror de apt ({mirror_url}) este disponible "
+        f"despues de {max_retries} intentos. Abortando ANTES de correr Ansible para "
+        f"evitar una falla a mitad del playbook. Verifica la conectividad de red o "
+        f"considera cambiar de mirror."
+    )
+
+
 def run_ansible_playbook():
     if is_step_completed("run_ansible_playbook"):
         print("[=] Paso 'run_ansible_playbook' ya fue ejecutado previamente. Omitiendo...")
@@ -615,6 +672,9 @@ def run_ansible_playbook():
 
     if not hostname:
         raise RuntimeError("No se encontro el hostname en la configuracion. Asegurate de correr 'set_ID' primero.")
+
+    print("[*] Pre-flight: verificando mirror de apt antes de invocar Ansible...")
+    ensure_apt_mirror_ready()
 
     pip_upgrade_cmd = 'sudo python3.10 -m pip install --upgrade pip'
     downgrade_cmd = 'sudo python3.10 -m pip install "setuptools<70.0.0"'
