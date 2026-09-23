@@ -1884,7 +1884,8 @@ def download_python_tools():
         "UUT_test_case.py",
         "share.py",
         "reboot.py",
-        "U22Tocinos"
+        "U22Tocinos",
+        "service_restart.py"
     ]
     
     destination_dir = "."
