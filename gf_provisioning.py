@@ -9,7 +9,6 @@ import time
 import select
 import atexit
 import uuid
-import getpass
 
 # ==============================================================================
 # CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
@@ -68,161 +67,38 @@ atexit.register(log_final_summary)
 # VARIABLES GLOBALES
 # ==============================================================================
 STATE_FILE = "provisioning_state.json"
-# SUDO_PASSWORD y MIRROR_PASSWORD ya NO viven aqui como texto plano.
-# Se piden interactivamente (una sola vez) en ensure_credentials() y se
-# guardan en STATE_FILE; estas variables globales se llenan en tiempo de
-# ejecucion antes de que cualquier otra funcion las use. VAULT_PASSWORD
-# se queda hardcodeada aqui por decision explicita.
+
+# --- Recursos propietarios (links, comandos, contrasenas) ---
+# NADA de esto vive hardcodeado en el codigo (para poder tener este script
+# en un repo publico). Todo se descarga en runtime desde resources_gf.json
+# (ver fetch_resources_gf()/ensure_resources(), llamada SIEMPRE como lo
+# primero en __main__) y estas variables se llenan ahi via _apply_resources().
 SUDO_PASSWORD = None
+VAULT_PASSWORD = None
 MIRROR_PASSWORD = None
-VAULT_PASSWORD = r"/!X6i8n0+cxK$v3m4tQ-"
-DEFAULT_NOMACHINE_URL = "https://download.nomachine.com/download/9.8/Linux/nomachine_9.8.2_1_amd64.deb"
-GPG_KEY_IMPORT_CMD = (
-    "wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | "
-    "sudo gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/google-chrome.gpg"
-)
-
-DHCPD_CONF_CONTENT = """# BEGIN ANSIBLE MANAGED BLOCK
-ddns-update-style none;
-ignore client-updates;
-allow booting;
-allow bootp;
-ddns-updates off;
-default-lease-time 6000;
-max-lease-time 7200;
-authoritative;
-subnet 10.0.0.0 netmask 255.255.0.0 {
-  option subnet-mask 255.255.0.0;
-  option routers 10.0.0.254;
-  option broadcast-address 10.0.255.255;
-  next-server 10.0.0.254;
-
-  filename "http://10.0.0.254:8001/pxelinux.0";
-}
-host izumi-1 { hardware ethernet 98:98:FB:CA:F0:E5; fixed-address 10.0.0.1; }
-host izumi-2 { hardware ethernet 98:98:FB:CA:F1:85; fixed-address 10.0.0.2; }
-host izumi-3 { hardware ethernet 98:98:FB:CB:06:DD; fixed-address 10.0.0.3; }
-host izumi-4 { hardware ethernet 98:98:FB:CB:01:ED; fixed-address 10.0.0.4; }
-host izumi-5 { hardware ethernet 98:98:FB:CA:D6:D5; fixed-address 10.0.0.5; }
-host izumi-6 { hardware ethernet 98:98:FB:D0:DA:05; fixed-address 10.0.0.6; }
-host izumi-7 { hardware ethernet 98:98:FB:CB:06:E5; fixed-address 10.0.0.7; }
-host izumi-8 { hardware ethernet 98:98:FB:C5:98:8D; fixed-address 10.0.0.8; }
-host izumi-9 { hardware ethernet 98:98:FB:CF:26:55; fixed-address 10.0.0.9; }
-host izumi-10 { hardware ethernet 98:98:FB:CB:0D:85; fixed-address 10.0.0.10; }
-host izumi-11 { hardware ethernet 98:98:FB:CF:25:3D; fixed-address 10.0.0.11; }
-host izumi-12 { hardware ethernet 98:98:FB:CA:E6:05; fixed-address 10.0.0.12; }
-host izumi-13 { hardware ethernet 98:98:FB:CB:6E:95; fixed-address 10.0.0.13; }
-host izumi-14 { hardware ethernet 98:98:FB:D0:E7:25; fixed-address 10.0.0.14; }
-host izumi-15 { hardware ethernet 98:98:FB:CA:E5:F5; fixed-address 10.0.0.15; }
-host izumi-16 { hardware ethernet 98:98:FB:C5:33:3D; fixed-address 10.0.0.16; }
-host rj45-switch { hardware ethernet 00:00:00:00:00:00; fixed-address 10.0.0.249; }
-
-# END ANSIBLE MANAGED BLOCK
-host zpe { hardware ethernet e4:1a:2c:02:c3:0c; fixed-address 10.0.0.253; }
-host iboot { hardware ethernet 00:0D:AD:04:92:28; fixed-address 10.0.0.250; }
-host tross { hardware ethernet C0:1C:6A:66:C2:E4; fixed-address 10.0.0.251; }
-  filename "http://10.0.0.254:8001/pxelinux.0";"""
-
-DHCPD6_CONF_CONTENT = """# BEGIN ANSIBLE MANAGED BLOCK
-ddns-update-style none;
-ignore client-updates;
-allow booting;
-allow bootp;
-ddns-updates off;
-default-lease-time 6000;
-max-lease-time 7200;
-authoritative;
-option domain-search-list code 119 = text;
-option dhcp6.bootfile-url code 59 = string;
-option dhcp6.name-servers fd00::9;
-
-subnet6 fd00::/64 {
-range6 fd00::11 fd00::FF;
-option dhcp6.bootfile-url "http://[fd00::9]:8001/diorite/ipxe.cfg";
-log(info, "DHCPv6 - Found other ipv6 client...");
-
-host diorite-1 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:F0:E2;
-log(info, "DHCPv6 - Found Diorite-1 client...");
-fixed-address6 fd00::10;
-}
-host diorite-2 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:F1:82;
-log(info, "DHCPv6 - Found Diorite-2 client...");
-fixed-address6 fd00::11;
-}
-host diorite-3 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:06:DA;
-log(info, "DHCPv6 - Found Diorite-3 client...");
-fixed-address6 fd00::12;
-}
-host diorite-4 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:01:EA;
-log(info, "DHCPv6 - Found Diorite-4 client...");
-fixed-address6 fd00::13;
-}
-host diorite-5 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:D6:D2;
-log(info, "DHCPv6 - Found Diorite-5 client...");
-fixed-address6 fd00::14;
-}
-host diorite-6 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:D0:DA:02;
-log(info, "DHCPv6 - Found Diorite-6 client...");
-fixed-address6 fd00::15;
-}
-host diorite-7 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:06:E2;
-log(info, "DHCPv6 - Found Diorite-7 client...");
-fixed-address6 fd00::16;
-}
-host diorite-8 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:C5:98:8A;
-log(info, "DHCPv6 - Found Diorite-8 client...");
-fixed-address6 fd00::17;
-}
-host diorite-9 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CF:26:52;
-log(info, "DHCPv6 - Found Diorite-9 client...");
-fixed-address6 fd00::18;
-}
-host diorite-10 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:0D:82;
-log(info, "DHCPv6 - Found Diorite-10 client...");
-fixed-address6 fd00::19;
-}
-host diorite-11 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CF:25:3A;
-log(info, "DHCPv6 - Found Diorite-11 client...");
-fixed-address6 fd00::1A;
-}
-host diorite-12 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:E6:02;
-log(info, "DHCPv6 - Found Diorite-12 client...");
-fixed-address6 fd00::1B;
-}
-host diorite-13 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:6E:92;
-log(info, "DHCPv6 - Found Diorite-13 client...");
-fixed-address6 fd00::1C;
-}
-host diorite-14 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:D0:E7:22;
-log(info, "DHCPv6 - Found Diorite-14 client...");
-fixed-address6 fd00::1D;
-}
-host diorite-15 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:E5:F2;
-log(info, "DHCPv6 - Found Diorite-15 client...");
-fixed-address6 fd00::1E;
-}
-host diorite-16 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:C5:33:3A;
-log(info, "DHCPv6 - Found Diorite-16 client...");
-fixed-address6 fd00::1F;
-}
-}
-# END ANSIBLE MANAGED BLOCK"""
+JUNIPER_ROOT_PASSWORD = None
+RACK_NETWORK_BASE = None          # ej. "172.24.125" -> IPs de rack "RACK_NETWORK_BASE.N"
+MIRROR_IP = None                  # IP del Git-Mirror
+VRMU_REMOTE_HOST = None           # host remoto para vrmu_util_config()
+PYTHON_TOOLS_REMOTE_HOST = None   # host remoto para download_python_tools()
+LEGO_INFRA_GIT_URL = None
+SECURITY_HARDENED_IMAGE_GIT_URL = None
+DEFAULT_NOMACHINE_URL = None
+GPG_KEY_IMPORT_CMD = None
+CHROME_REPO_LINE = None
+ANSIBLE_PLAYBOOK_FILE = None
+MIRROR_ANSIBLE_DIR = None
+MIRROR_ANSIBLE_PLAYBOOK = None
+PYTHON_TOOLS_FILES = []
+VRMU_ITEMS_TO_DOWNLOAD = []
+LEGO_INFRA_SUBDIR = None
+LEGO_ABMX_TEST_SERVER_SUBDIR = None
+LEGO_ZPE_CONSOLE_SERVER_SUBDIR = None
+NOMACHINE_INSTALL_YAML = None
+SECURITY_HARDENED_IMAGE_SUBDIR = None
+SECURITY_READ_FLG_FILE = None
+DHCPD_CONF_CONTENT = None
+DHCPD6_CONF_CONTENT = None
 
 def print_ascii_fail(message="Se detecto un error durante la ejecucion."):
     """Banner compacto de FALLO (rojo). 'message' describe que fallo
@@ -291,65 +167,151 @@ def mark_step_completed(step_name, extra_config=None):
     save_state(state)
     print(f"[✓] Paso '{step_name}' completado y registrado en {STATE_FILE}.")
 
-def _prompt_password_twice(label):
-    """Pide una contraseña dos veces (input oculto via getpass) hasta que
-    ambas coincidan y no esten vacias. Se usa para no dejar contrasenas
-    hardcodeadas en el codigo fuente."""
-    while True:
-        p1 = getpass.getpass(f"Ingresa la contraseña de {label}: ")
-        if not p1:
-            print("[!] La contraseña no puede estar vacia. Intenta de nuevo.\n")
-            continue
-        p2 = getpass.getpass(f"Confirma la contraseña de {label}: ")
-        if p1 != p2:
-            print("[!] Las contraseñas no coinciden. Intenta de nuevo.\n")
-            continue
-        return p1
+RESOURCES_FILE = "resources_gf.json"
+RESOURCES_START_IP = "172.24.125.136"
+RESOURCES_HTTP_PORT = 8000
+RESOURCES_HTTP_PATH = "/resources_gf.json"
 
-def ensure_credentials():
-    """Se llama SIEMPRE como lo primero al arrancar el script (antes de
-    _activate_sudo() y de cualquier otro paso). La primera vez que se
-    corre el script en un equipo, pide interactivamente la contrasena de
-    sudo y la del usuario 'testusr' en el Git-Mirror, cada una dos veces
-    para validar que coincidan, y las guarda en STATE_FILE. En corridas
-    posteriores (o tras un reinicio a mitad del provisioning) las lee
-    directo del state file sin volver a preguntar.
+def _try_download_resources_from_ip(ip, port=RESOURCES_HTTP_PORT, path=RESOURCES_HTTP_PATH, timeout=8):
+    """Un solo intento de bajar resources_gf.json de 'ip' por HTTP simple.
+    Devuelve el dict parseado, o None si el host no respondio o el
+    contenido no es JSON valido."""
+    url = f"http://{ip}:{port}{path}"
+    res = subprocess.run(
+        f"curl -s -f --max-time {timeout} {url}",
+        shell=True, capture_output=True, text=True
+    )
+    if res.returncode != 0 or not res.stdout.strip():
+        return None
+    try:
+        return json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None
 
-    VAULT_PASSWORD se queda hardcodeada en el codigo por decision
-    explicita -- esta funcion no la toca.
+def fetch_resources_gf(start_ip=RESOURCES_START_IP, max_octet=254, retries_per_host=2, retry_delay=5):
+    """Descarga resources_gf.json (links, comandos, rutas de archivos y
+    contrasenas propietarias) desde otro rack de la red, asumiendo que
+    cada rack lo sirve por HTTP simple en RESOURCES_HTTP_PORT/RESOURCES_HTTP_PATH.
+
+    Empieza en 'start_ip' (172.24.125.136 por default) y, si ese host no
+    responde tras 'retries_per_host' intentos, prueba el siguiente
+    (ultimo octeto +1), hasta encontrar uno que sirva el archivo o
+    agotar el rango 172.24.125.{start_octet}-254.
+
+    Se guarda una copia local (RESOURCES_FILE) al descargar con exito,
+    que se usa como ultimo recurso si en una corrida posterior (ej. tras
+    un reboot a mitad del provisioning) ningun rack responde.
     """
-    global SUDO_PASSWORD, MIRROR_PASSWORD
+    ip_parts = start_ip.split(".")
+    base = ".".join(ip_parts[:3])
+    start_octet = int(ip_parts[3])
 
-    state = load_state()
-    creds = state.get("config", {}).get("_credentials", {})
-    stored_sudo = creds.get("sudo_password")
-    stored_mirror = creds.get("mirror_password")
+    print("--- Descargando resources_gf.json desde la red ---")
+    for octet in range(start_octet, max_octet + 1):
+        ip = f"{base}.{octet}"
+        for attempt in range(1, retries_per_host + 1):
+            print(f"[*] Probando {ip} (intento {attempt}/{retries_per_host})...")
+            data = _try_download_resources_from_ip(ip)
+            if data is not None:
+                print(f"[✓] resources_gf.json descargado desde {ip}.")
+                with open(RESOURCES_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                return data
+            if attempt < retries_per_host:
+                time.sleep(retry_delay)
+        print(f"[!] {ip} no respondio. Probando el siguiente host...")
 
-    if stored_sudo and stored_mirror:
-        SUDO_PASSWORD = stored_sudo
-        MIRROR_PASSWORD = stored_mirror
-        print("[=] Credenciales ya configuradas previamente. Cargando desde el state file...")
-        return
+    if os.path.exists(RESOURCES_FILE):
+        print(f"[!] No se pudo descargar resources_gf.json de ningun host "
+              f"({base}.{start_octet}-{max_octet}). Usando la copia local "
+              f"existente de una corrida anterior...")
+        with open(RESOURCES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-    print("--- Configuracion inicial de credenciales ---")
-    print("Esto solo se pide una vez por equipo; quedan guardadas en el state file")
-    print("para esta y futuras ejecuciones (incluidos los reinicios a mitad del proceso).\n")
+    raise RuntimeError(
+        f"No se pudo descargar resources_gf.json de ningun host en el rango "
+        f"{base}.{start_octet}-{max_octet}, y no hay copia local previa. "
+        f"Verifica que algun rack este sirviendo el archivo por HTTP en el "
+        f"puerto {RESOURCES_HTTP_PORT}."
+    )
 
-    SUDO_PASSWORD = stored_sudo or _prompt_password_twice("sudo (usuario local del equipo)")
-    MIRROR_PASSWORD = stored_mirror or _prompt_password_twice("del usuario 'testusr' en el Git-Mirror (172.24.125.2)")
+def _apply_resources(data):
+    """Vuelca resources_gf.json sobre las variables globales que el resto
+    del script consume. Lanza RuntimeError si falta algun campo critico
+    (credenciales o red), para no arrancar el provisioning a medias."""
+    global SUDO_PASSWORD, VAULT_PASSWORD, MIRROR_PASSWORD, JUNIPER_ROOT_PASSWORD
+    global RACK_NETWORK_BASE, MIRROR_IP, VRMU_REMOTE_HOST, PYTHON_TOOLS_REMOTE_HOST
+    global LEGO_INFRA_GIT_URL, SECURITY_HARDENED_IMAGE_GIT_URL
+    global DEFAULT_NOMACHINE_URL, GPG_KEY_IMPORT_CMD, CHROME_REPO_LINE
+    global ANSIBLE_PLAYBOOK_FILE, MIRROR_ANSIBLE_DIR, MIRROR_ANSIBLE_PLAYBOOK
+    global PYTHON_TOOLS_FILES, VRMU_ITEMS_TO_DOWNLOAD
+    global LEGO_INFRA_SUBDIR, LEGO_ABMX_TEST_SERVER_SUBDIR, LEGO_ZPE_CONSOLE_SERVER_SUBDIR
+    global NOMACHINE_INSTALL_YAML, SECURITY_HARDENED_IMAGE_SUBDIR, SECURITY_READ_FLG_FILE
+    global DHCPD_CONF_CONTENT, DHCPD6_CONF_CONTENT
 
-    state = load_state()
-    state.setdefault("config", {})["_credentials"] = {
-        "sudo_password": SUDO_PASSWORD,
-        "mirror_password": MIRROR_PASSWORD,
+    creds = data.get("credentials", {})
+    SUDO_PASSWORD = creds.get("sudo_password")
+    VAULT_PASSWORD = creds.get("vault_password")
+    MIRROR_PASSWORD = creds.get("mirror_password")
+    JUNIPER_ROOT_PASSWORD = creds.get("juniper_root_password")
+
+    net = data.get("network", {})
+    RACK_NETWORK_BASE = net.get("rack_network_base")
+    MIRROR_IP = net.get("mirror_ip")
+    VRMU_REMOTE_HOST = net.get("vrmu_remote_host")
+    PYTHON_TOOLS_REMOTE_HOST = net.get("python_tools_remote_host")
+
+    repos = data.get("git_repos", {})
+    LEGO_INFRA_GIT_URL = repos.get("lego_infra")
+    SECURITY_HARDENED_IMAGE_GIT_URL = repos.get("security_hardened_image")
+
+    urls = data.get("urls", {})
+    DEFAULT_NOMACHINE_URL = urls.get("nomachine_deb")
+    google_gpg_key_url = urls.get("google_gpg_key")
+    GPG_KEY_IMPORT_CMD = (
+        f"wget -q -O - {google_gpg_key_url} | "
+        f"sudo gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/google-chrome.gpg"
+    ) if google_gpg_key_url else None
+    CHROME_REPO_LINE = urls.get("google_chrome_repo_line")
+
+    paths = data.get("paths", {})
+    LEGO_INFRA_SUBDIR = paths.get("lego_infra_subdir")
+    LEGO_ABMX_TEST_SERVER_SUBDIR = paths.get("lego_abmx_test_server_subdir")
+    LEGO_ZPE_CONSOLE_SERVER_SUBDIR = paths.get("lego_zpe_console_server_subdir")
+    NOMACHINE_INSTALL_YAML = paths.get("nomachine_install_yaml")
+    SECURITY_HARDENED_IMAGE_SUBDIR = paths.get("security_hardened_image_subdir")
+    SECURITY_READ_FLG_FILE = paths.get("security_read_flg_file")
+
+    ansible = data.get("ansible", {})
+    ANSIBLE_PLAYBOOK_FILE = ansible.get("playbook_file")
+    MIRROR_ANSIBLE_DIR = ansible.get("mirror_ansible_dir")
+    MIRROR_ANSIBLE_PLAYBOOK = ansible.get("mirror_ansible_playbook")
+
+    PYTHON_TOOLS_FILES = data.get("python_tools_files", [])
+    VRMU_ITEMS_TO_DOWNLOAD = data.get("vrmu_items_to_download", [])
+    DHCPD_CONF_CONTENT = data.get("dhcpd_conf_content")
+    DHCPD6_CONF_CONTENT = data.get("dhcpd6_conf_content")
+
+    required = {
+        "credentials.sudo_password": SUDO_PASSWORD,
+        "credentials.vault_password": VAULT_PASSWORD,
+        "credentials.mirror_password": MIRROR_PASSWORD,
+        "credentials.juniper_root_password": JUNIPER_ROOT_PASSWORD,
+        "network.rack_network_base": RACK_NETWORK_BASE,
+        "network.mirror_ip": MIRROR_IP,
     }
-    save_state(state)
+    missing = [k for k, v in required.items() if not v]
+    if missing:
+        raise RuntimeError(f"resources_gf.json esta incompleto, faltan campos: {', '.join(missing)}")
 
-    # El state file ahora contiene contrasenas en texto plano: restringimos
-    # su lectura al dueno del archivo como mitigacion minima.
-    subprocess.run(f"sudo chmod 600 {STATE_FILE}", shell=True, check=False)
-
-    print(f"[✓] Credenciales guardadas en {STATE_FILE} (permisos restringidos a 600).\n")
+def ensure_resources():
+    """Se llama SIEMPRE como lo primero al arrancar el script (antes de
+    _activate_sudo() y de cualquier otro paso): descarga resources_gf.json
+    desde la red (ver fetch_resources_gf) y aplica sus valores a las
+    variables globales del modulo."""
+    data = fetch_resources_gf()
+    _apply_resources(data)
+    print("[✓] Recursos propietarios (credenciales, links, rutas) cargados desde resources_gf.json.\n")
 
 def _activate_sudo():
     """Activa (o refresca) las credenciales de sudo en cache de forma NO
@@ -446,7 +408,7 @@ def set_ID():
     if last_octet > 254:
         raise ValueError(f"El octeto calculado ({last_octet}) excede el rango valido de IP.")
         
-    ip_address = f"172.24.125.{last_octet}"
+    ip_address = f"{RACK_NETWORK_BASE}.{last_octet}"
     hostname = f"ghostfish-ist-flg-{rack_num:03d}"
 
     config_data = {
@@ -475,7 +437,7 @@ def set_network():
 
     nmcli_cmd = (
         f'sudo nmcli con add con-name "SFC" ifname eno1 type ethernet '
-        f'ipv4.method manual ipv4.addresses {ip_address}/24 gw4 172.24.125.1 ipv4.dns 8.8.8.8'
+        f'ipv4.method manual ipv4.addresses {ip_address}/24 gw4 {RACK_NETWORK_BASE}.1 ipv4.dns 8.8.8.8'
     )
     run_interactive(nmcli_cmd)
 
@@ -505,8 +467,7 @@ def set_network():
     mark_step_completed("set_network")
 
 def _run_scp_from_mirror_once(remote_path, local_destination):
-    mirror_ip = "172.24.125.2"
-    cmd = f"scp testusr@{mirror_ip}:{remote_path} {local_destination}"
+    cmd = f"scp testusr@{MIRROR_IP}:{remote_path} {local_destination}"
     print(f"[CMD] Copiando desde Mirror: {cmd}")
 
     child = pexpect.spawn(cmd, encoding="utf-8", timeout=30)
@@ -559,15 +520,15 @@ def gitconfig_cookie():
     run_scp_from_mirror("~/.gitconfig", f"{user_home}/")
     run_scp_from_mirror("~/.gitcookies", f"{user_home}/")
 
-    sec_repo_path = os.path.join(user_home, "security-hardened-image")
+    sec_repo_path = os.path.join(user_home, SECURITY_HARDENED_IMAGE_SUBDIR)
     if not os.path.exists(sec_repo_path):
-        print("[*] Clonando repo security-hardened-image...")
-        clone_cmd = f"git clone https://mfg-partners.googlesource.com/security-hardened-image {sec_repo_path}"
+        print(f"[*] Clonando repo {SECURITY_HARDENED_IMAGE_SUBDIR}...")
+        clone_cmd = f"git clone {SECURITY_HARDENED_IMAGE_GIT_URL} {sec_repo_path}"
         run_command(clone_cmd)
     else:
-        print("[=] El repositorio 'security-hardened-image' ya existe. Omitiendo clonacion...")
+        print(f"[=] El repositorio '{SECURITY_HARDENED_IMAGE_SUBDIR}' ya existe. Omitiendo clonacion...")
 
-    run_scp_from_mirror("security-read-flg.json", f"{user_home}/")
+    run_scp_from_mirror(SECURITY_READ_FLG_FILE, f"{user_home}/")
     mark_step_completed("gitconfig_cookie")
 
 def flex_tag():
@@ -619,7 +580,7 @@ def run_security_patch():
     print("--- PASO 5: Ejecución de setup-patch.sh ---")
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     user_home = f"/home/{sudo_user}"
-    sec_dir = os.path.join(user_home, "security-hardened-image")
+    sec_dir = os.path.join(user_home, SECURITY_HARDENED_IMAGE_SUBDIR)
     patch_script = os.path.join(sec_dir, "scripts/setup-patch.sh")
 
     if not os.path.exists(patch_script):
@@ -651,13 +612,13 @@ def validate_and_lego_setup():
     run_interactive("sudo add-apt-repository universe -y")
     run_interactive("sudo pip3 install google-cloud-appengine-logging google-cloud-audit-log google-cloud-logging")
 
-    lego_dir = os.path.join(user_home, "lego-infra")
+    lego_dir = os.path.join(user_home, LEGO_INFRA_SUBDIR)
     if not os.path.exists(lego_dir):
-        print("[*] Clonando repo lego-infra...")
-        clone_cmd = f"git clone https://mfg-partners.googlesource.com/lego-infra {lego_dir}"
+        print(f"[*] Clonando repo {LEGO_INFRA_SUBDIR}...")
+        clone_cmd = f"git clone {LEGO_INFRA_GIT_URL} {lego_dir}"
         run_command(clone_cmd)
     else:
-        print("[=] El repositorio 'lego-infra' ya existe. Omitiendo clonacion...")
+        print(f"[=] El repositorio '{LEGO_INFRA_SUBDIR}' ya existe. Omitiendo clonacion...")
 
     ansible_script_dir = os.path.join(lego_dir, "lego_setup/ansible_installation_script")
     print("[*] Ejecutando install-ansible-clean.sh...")
@@ -676,7 +637,7 @@ def setup_nomachine_yaml():
 
     print("--- PASO 7: Actualizacion de URL NoMachine en YAML ---")
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    yaml_path = f"/home/{sudo_user}/lego-infra/lego_setup/lego_abmx_test_server/install-nomachine.yaml"
+    yaml_path = f"/home/{sudo_user}/{LEGO_INFRA_SUBDIR}/{LEGO_ABMX_TEST_SERVER_SUBDIR}/{NOMACHINE_INSTALL_YAML}"
 
     if not os.path.exists(yaml_path):
         raise FileNotFoundError(f"No se encontró el archivo: {yaml_path}")
@@ -704,7 +665,7 @@ def setup_nomachine_yaml():
                 break
 
     if not updated:
-        raise RuntimeError("No se encontro el patron 'deb: \"{{ nomachine_deb }}\"' en install-nomachine.yaml")
+        raise RuntimeError(f"No se encontro el patron 'deb: \"{{{{ nomachine_deb }}}}\"' en {NOMACHINE_INSTALL_YAML}")
 
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
@@ -912,11 +873,11 @@ def run_ansible_playbook():
     run_interactive(downgrade_cmd)
 
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    playbook_dir = f"/home/{sudo_user}/lego-infra/lego_setup/lego_abmx_test_server"
+    playbook_dir = f"/home/{sudo_user}/{LEGO_INFRA_SUBDIR}/{LEGO_ABMX_TEST_SERVER_SUBDIR}"
 
     cmd = (
         f"cd {playbook_dir} && "
-        f"ansible-playbook -i localhost, lego_abmx_test_server_setup.yml -vv "
+        f"ansible-playbook -i localhost, {ANSIBLE_PLAYBOOK_FILE} -vv "
         f"--ask-become-pass --connection=local --vault-id @prompt --flush-cache"
     )
 
@@ -1064,10 +1025,8 @@ def run_final_abmx_config():
     fix_local_dir_cmd = f"sudo chown -R {sudo_user}:{sudo_user} /home/{sudo_user}/.local"
     run_interactive(fix_local_dir_cmd)
 
-    mirror_ip = "172.24.125.2"
-
     ssh_copy_cmd = f"ssh-copy-id -i ~/.ssh/id_rsa.pub {sudo_user}@{ip_address}"
-    cmd_remote_copy = f"ssh {sudo_user}@{mirror_ip} '{ssh_copy_cmd}'"
+    cmd_remote_copy = f"ssh {sudo_user}@{MIRROR_IP} '{ssh_copy_cmd}'"
     print(f"[CMD Interactive] {cmd_remote_copy}")
 
     child_copy = pexpect.spawn("bash", ["-c", cmd_remote_copy], encoding="utf-8", timeout=300)
@@ -1076,7 +1035,7 @@ def run_final_abmx_config():
     while True:
         idx = child_copy.expect([
             r"Are you sure you want to continue connecting \(yes/no/\[fingerprint\]\)\?",
-            r"testusr@172\.24\.125\.2's password:",
+            rf"testusr@{re.escape(MIRROR_IP)}'s password:",
             r"[pP]assword:",
             pexpect.EOF,
             pexpect.TIMEOUT
@@ -1095,10 +1054,10 @@ def run_final_abmx_config():
     child_copy.close()
 
     ansible_cmd = (
-        f"cd ~/amp-ansible && ansible-playbook -i {ip_address}, repo_updater/configure-fish-station.yaml "
+        f"cd {MIRROR_ANSIBLE_DIR} && ansible-playbook -i {ip_address}, {MIRROR_ANSIBLE_PLAYBOOK} "
         f"-vv --ask-become-pass --ask-pass --flush-cache --vault-id @prompt"
     )
-    cmd_remote_ansible = f"ssh -t {sudo_user}@{mirror_ip} '{ansible_cmd}'"
+    cmd_remote_ansible = f"ssh -t {sudo_user}@{MIRROR_IP} '{ansible_cmd}'"
     print(f"[CMD Interactive] {cmd_remote_ansible}")
 
     child_ansible = pexpect.spawn("bash", ["-c", cmd_remote_ansible], encoding="utf-8", timeout=None)
@@ -1109,7 +1068,7 @@ def run_final_abmx_config():
     while True:
         idx = child_ansible.expect([
             r"Are you sure you want to continue connecting \(yes/no/\[fingerprint\]\)\?",
-            r"testusr@172\.24\.125\.2's password:",
+            rf"testusr@{re.escape(MIRROR_IP)}'s password:",
             r"SSH password:",
             r"BECOME password\[defaults to SSH password\]:",
             r"BECOME password:",
@@ -1261,17 +1220,11 @@ network:
 
     mark_step_completed("network_plan")
 
-def force_test_network_selection():
-    """Fuerza que la conexion 'Test Network' quede activa y priorizada en la interfaz ens4f0."""
-    if is_step_completed("force_test_network_selection"):
-        print("[=] Paso 'force_test_network_selection' ya fue ejecutado previamente. Omitiendo...")
-        return
-
-    print("--- PASO: Forzar seleccion de 'Test Network' en Ethernet (ens4f0) ---")
-
-    interface = "ens4f0"
-    target_conn = "Test Network"
-
+def _apply_test_network_selection(interface="ens4f0", target_conn="Test Network"):
+    """Logica compartida: fuerza que 'target_conn' quede activa y priorizada en
+    'interface'. No usa is_step_completed ni mark_step_completed: queda a
+    criterio de quien la invoque (ver 'force_test_network_selection' y
+    'ensure_test_network_selected_on_startup') decidir cuando ejecutarla."""
     print(f"[*] Consultando perfiles de NetworkManager asociados a {interface}...")
     result = subprocess.run(
         ["nmcli", "-t", "-f", "NAME,DEVICE,UUID", "connection", "show"],
@@ -1335,7 +1288,45 @@ def force_test_network_selection():
         )
 
     print(f"[✓] '{target_conn}' quedo forzada como conexion activa en {interface}.")
+
+def force_test_network_selection():
+    """Fuerza que la conexion 'Test Network' quede activa y priorizada en la interfaz ens4f0.
+    Paso guardado (se ejecuta una sola vez) dentro del TEST PLAN."""
+    if is_step_completed("force_test_network_selection"):
+        print("[=] Paso 'force_test_network_selection' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Forzar seleccion de 'Test Network' en Ethernet (ens4f0) ---")
+    _apply_test_network_selection()
     mark_step_completed("force_test_network_selection")
+
+def ensure_test_network_selected_on_startup():
+    """Se ejecuta SIEMPRE que se abre gf_provisioning.py (sin 'is_step_completed').
+    Si el 'run_final_abmx_config' ya se ejecuto anteriormente en este equipo,
+    verifica que 'Test Network' siga siendo la conexion activa en ens4f0; si no
+    lo es (por ejemplo, tras un reinicio o cambio manual), la vuelve a seleccionar."""
+    if not is_step_completed("run_final_abmx_config"):
+        # El run final de ABMX aun no se ha hecho: la seleccion normal de
+        # 'Test Network' la cubre el paso 'force_test_network_selection' del TEST PLAN.
+        return
+
+    interface = "ens4f0"
+    target_conn = "Test Network"
+
+    print(f"[*] Verificando conexion activa en {interface} (post run_final_abmx_config)...")
+    verify = subprocess.run(
+        ["nmcli", "-t", "-f", "GENERAL.CONNECTION", "device", "show", interface],
+        capture_output=True, text=True
+    )
+    active_conn = verify.stdout.strip().split(":", 1)[-1].strip() if verify.stdout else ""
+
+    if active_conn == target_conn:
+        print(f"[=] '{target_conn}' ya se encuentra seleccionada en {interface}. No se requiere accion.")
+        return
+
+    print(f"[!] '{target_conn}' NO esta seleccionada en {interface} "
+          f"(activa: '{active_conn or 'ninguna'}'). Re-seleccionando...")
+    _apply_test_network_selection(interface, target_conn)
 
 def _print_yellow_banner(message):
     """Imprime un mensaje resaltado en amarillo, con borde, para instrucciones manuales."""
@@ -1436,11 +1427,18 @@ def _wait_for_console_connection_enter(banner_message, devices, baud):
 
         print("[!] Se detecto el dispositivo pero no se pudo abrir minicom. Intente nuevamente.")
 
+def _clear_terminal():
+    """Limpia la pantalla de la terminal local (no la sesion minicom). Se usa
+    tras salir de una sesion minicom (ZPE, Juniper) para eliminar el 'ruido'
+    que dejo el volcado en vivo de esa consola (child.logfile_read = sys.stdout)."""
+    os.system("clear")
+
 def _minicom_exit(child):
     """Sale de una sesion minicom con Ctrl+A, X, confirmando el dialogo
     'Leave Minicom?' con ENTER (la opcion 'Yes' viene resaltada por defecto).
     Es seguro llamarla mas de una vez sobre el mismo 'child': si la sesion
-    ya esta cerrada, no hace nada (evita el error 'Bad file descriptor')."""
+    ya esta cerrada, no hace nada (evita el error 'Bad file descriptor').
+    Al salir, siempre limpia la terminal local (ver '_clear_terminal')."""
     if child is None or getattr(child, "closed", False):
         return
     print("[*] Saliendo de minicom (Ctrl+A, X)...")
@@ -1461,6 +1459,7 @@ def _minicom_exit(child):
             child.close(force=True)
         except Exception:
             pass
+        _clear_terminal()
 
 def _juniper_expect_or_fail(child, patterns, timeout, error_msg):
     """Helper para juniper_config(): hace expect() sobre 'patterns' y agrega
@@ -1613,12 +1612,12 @@ def juniper_config():
             child, [r"[Nn]ew password:"], timeout=20,
             error_msg="No se recibio el prompt 'New password:' de JUNOS."
         )
-        child.sendline("google123")
+        child.sendline(JUNIPER_ROOT_PASSWORD)
         _juniper_expect_or_fail(
             child, [r"[Rr]etype new password:"], timeout=20,
             error_msg="No se recibio el prompt 'Retype new password:' de JUNOS."
         )
-        child.sendline("google123")
+        child.sendline(JUNIPER_ROOT_PASSWORD)
         _juniper_expect_or_fail(
             child, [r"#\s"], timeout=20,
             error_msg="No se regreso al prompt de configuracion tras fijar la contrasena de root."
@@ -1862,7 +1861,7 @@ def zpe_config():
 
     # --- PASO G: Ejecutar script de configuracion de todos los puertos del ZPE via SSH ---
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    zpe_script_dir = f"/home/{sudo_user}/lego-infra/lego_setup/lego_zpe_console_server"
+    zpe_script_dir = f"/home/{sudo_user}/{LEGO_INFRA_SUBDIR}/{LEGO_ZPE_CONSOLE_SERVER_SUBDIR}"
     ssh_cmd = (
         f"cd {zpe_script_dir} && "
         "ssh -t -t -v -o ConnectTimeout=10 admin@10.0.0.253 < lego_config_zpe_allports.sh"
@@ -2006,18 +2005,13 @@ def vrmu_util_config():
 
     print("--- PASO: Descarga y configuracion de VRMU Util / Viperfish-DVC ---")
 
-    remote_host = "172.24.125.172"
+    remote_host = VRMU_REMOTE_HOST
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     remote_user = sudo_user
     home_dir = f"/home/{sudo_user}"
 
     # --- PASO 1: Descargar por SCP los directorios/archivos necesarios ---
-    items_to_download = [
-        "viperfish-dvc",
-        "vrmu_util",
-        "ledare_1_*",
-        "FWContainer_EN_3_AP_00_02_00_09.bin",
-    ]
+    items_to_download = VRMU_ITEMS_TO_DOWNLOAD
 
     for item in items_to_download:
         remote_path = f"/home/{remote_user}/{item}"
@@ -2111,17 +2105,11 @@ def download_python_tools():
 
     print("--- PASO: Descarga de Herramientas Python por SCP ---")
     
-    remote_host = "172.24.125.174"
+    remote_host = PYTHON_TOOLS_REMOTE_HOST
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     remote_user = sudo_user
     
-    files_to_download = [
-        "dhcpd.py",
-        "UUT_test_case.py",
-        "share.py",
-        "reboot.py",
-        "U22Tocinos"
-    ]
+    files_to_download = PYTHON_TOOLS_FILES
     
     destination_dir = "."
     
@@ -2196,7 +2184,7 @@ def fix_chrome():
     _retry_download(lambda: run_interactive(GPG_KEY_IMPORT_CMD), "descarga de llave GPG de Google")
 
     print("[*] Configurando el repositorio oficial de Google Chrome...")
-    repo_cmd = 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list'
+    repo_cmd = f'echo "{CHROME_REPO_LINE}" | sudo tee /etc/apt/sources.list.d/google-chrome.list'
     run_interactive(repo_cmd)
 
     print("[*] Actualizando listas de paquetes de apt e instalando Google Chrome Stable...")
@@ -2318,12 +2306,19 @@ def end_config_reboot():
     log_final_summary()
 
 if __name__ == "__main__":
-    ensure_credentials()
+    ensure_resources()
     print("[*] Activando sudo de forma automatica...")
     if _activate_sudo():
         print("[✓] Sudo activado correctamente.")
     else:
         print("[!] No se pudo confirmar la activacion inicial de sudo.")
+
+    print("[*] Verificando seleccion de 'Test Network' (aplica si el run final de ABMX ya se ejecuto)...")
+    ensure_test_network_selected_on_startup()
+
+##############################################################################################
+#TEST PLAN
+##############################################################################################
     set_ID()
     set_network()
     gitconfig_cookie()
@@ -2341,7 +2336,15 @@ if __name__ == "__main__":
     juniper_config()
     zpe_config()
     vrmu_util_config()
-    tross_capture_mac()
     download_python_tools()
     fix_chrome()
+##############################################################################################
+#Instrument config
+############################################################################################## 
+    tross_capture_mac()
+    juniper_config()
+    zpe_config()
+##############################################################################################
+#reboot
+##############################################################################################       
     end_config_reboot()
