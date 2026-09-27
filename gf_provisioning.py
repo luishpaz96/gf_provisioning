@@ -4,6 +4,7 @@ import os
 import sys
 import subprocess
 import re
+import shutil
 import pexpect
 import time
 import select
@@ -267,17 +268,68 @@ def fix_state_file_permissions():
         subprocess.run(f"sudo chown {sudo_user}:{sudo_user} {STATE_FILE}", shell=True, stderr=subprocess.DEVNULL)
         _state_perms_fixed = True
 
+def _atomic_write_json(filepath, data):
+    """Escribe 'data' como JSON en 'filepath' de forma ATOMICA: primero se
+    escribe a un archivo temporal en el mismo directorio y luego se reemplaza
+    el destino final con os.replace() (atomico en POSIX). Asi, si el proceso
+    se interrumpe a mitad de la escritura (Ctrl+C, crash, corte de luz), el
+    archivo original queda intacto en vez de quedar truncado/corrupto -- que
+    es justamente lo que paso cuando 'json.dump' escribia directo sobre
+    STATE_FILE y el proceso se corto a mitad de camino.
+
+    Ademas, antes de reemplazar, deja una copia de respaldo
+    ('<filepath>.bak') del contenido previo, para poder recuperarlo si hiciera
+    falta (ver _load_json_state)."""
+    if os.path.exists(filepath):
+        try:
+            shutil.copyfile(filepath, filepath + ".bak")
+        except Exception as e:
+            print(f"[!] Advertencia: no se pudo generar el respaldo de '{filepath}' ({e}).")
+    tmp_path = f"{filepath}.tmp.{os.getpid()}"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=4)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, filepath)
+
+def _load_json_state(filepath):
+    """Carga el JSON de 'filepath'. Si el archivo esta corrupto (JSON
+    invalido -- por ejemplo, truncado a mitad de una escritura de una
+    corrida anterior interrumpida), intenta recuperarlo automaticamente
+    desde '<filepath>.bak' (el respaldo que deja _atomic_write_json antes de
+    cada escritura). Si tampoco se puede recuperar, falla con un mensaje
+    claro y accionable en vez de dejar pasar el JSONDecodeError crudo."""
+    if not os.path.exists(filepath):
+        return {"flags": {}, "config": {}}
+    try:
+        with open(filepath, "r") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        backup_path = filepath + ".bak"
+        print(f"[!] Advertencia: '{filepath}' esta corrupto (JSON invalido: {e}).")
+        if os.path.exists(backup_path):
+            try:
+                with open(backup_path, "r") as f:
+                    data = json.load(f)
+                print(f"[*] Se recupero el respaldo '{backup_path}' correctamente. "
+                      f"Puede faltar el ultimo cambio que no llego a guardarse.")
+                return data
+            except json.JSONDecodeError:
+                print(f"[!] El respaldo '{backup_path}' tambien esta corrupto.")
+        raise RuntimeError(
+            f"El archivo de estado '{filepath}' esta corrupto (JSON invalido) y no se "
+            f"pudo recuperar desde su respaldo ('{backup_path}'). Revisalo/corregilo "
+            f"manualmente, o borralo si preferis empezar de cero para este archivo, "
+            f"antes de volver a correr el script."
+        ) from e
+
 def load_state():
     fix_state_file_permissions()
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    return {"flags": {}, "config": {}}
+    return _load_json_state(STATE_FILE)
 
 def save_state(state):
     fix_state_file_permissions()
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=4)
+    _atomic_write_json(STATE_FILE, state)
 
 def is_step_completed(step_name):
     state = load_state()
@@ -290,6 +342,51 @@ def mark_step_completed(step_name, extra_config=None):
         state["config"].update(extra_config)
     save_state(state)
     print(f"[✓] Paso '{step_name}' completado y registrado en {STATE_FILE}.")
+
+# ==============================================================================
+# ESTADO DEDICADO DE TROSS_CONFIG (tross_config.json)
+# ==============================================================================
+# Las banderas/config internas de TROSS_CONFIG (las 11 etapas + el flag final
+# 'TROSS_CONFIG' + 'tross_lease') viven en su PROPIO archivo, separado de
+# provisioning_state.json. Asi, si hace falta re-correr todo el proceso del
+# Tross desde cero, alcanza con borrar tross_config.json (sin tocar el resto
+# del estado del provisioning: credenciales, IP, MACs de ZPE/Juniper, etc.).
+# 'tross_mac' (capturado por tross_capture_mac) sigue viviendo en el state
+# file principal, ya que es un dato de entrada de TROSS_CONFIG, no un
+# progreso interno de este proceso.
+TROSS_STATE_FILE = "tross_config.json"
+_tross_state_perms_fixed = False
+
+def fix_tross_state_file_permissions():
+    """Analogo a fix_state_file_permissions() pero para TROSS_STATE_FILE."""
+    global _tross_state_perms_fixed
+    if _tross_state_perms_fixed:
+        return
+    if os.path.exists(TROSS_STATE_FILE):
+        sudo_user = os.environ.get('SUDO_USER', 'testusr')
+        subprocess.run(f"sudo chown {sudo_user}:{sudo_user} {TROSS_STATE_FILE}", shell=True,
+                        stderr=subprocess.DEVNULL)
+        _tross_state_perms_fixed = True
+
+def load_tross_state():
+    fix_tross_state_file_permissions()
+    return _load_json_state(TROSS_STATE_FILE)
+
+def save_tross_state(state):
+    fix_tross_state_file_permissions()
+    _atomic_write_json(TROSS_STATE_FILE, state)
+
+def is_tross_step_completed(step_name):
+    state = load_tross_state()
+    return state.get("flags", {}).get(step_name, False)
+
+def mark_tross_step_completed(step_name, extra_config=None):
+    state = load_tross_state()
+    state["flags"][step_name] = True
+    if extra_config:
+        state["config"].update(extra_config)
+    save_tross_state(state)
+    print(f"[✓] Paso '{step_name}' completado y registrado en {TROSS_STATE_FILE}.")
 
 def _prompt_password_twice(label):
     """Pide una contraseña dos veces (input oculto via getpass) hasta que
@@ -2118,7 +2215,42 @@ def tross_capture_mac():
 # ==============================================================================
 
 TROSS_PROMPT = r"root@:[^\r\n]*"
-UBOOT_PROMPT = r"=>\s"
+# NOTA IMPORTANTE: el prompt de U-Boot es la cadena "=> " sola en su propia
+# linea. El patron anterior (r"=>\s") hacia match con CUALQUIER "=>" seguido
+# de un espacio en TODO el stream, incluyendo texto de log normal como
+# "bootCount 0 => 1" (que aparece durante el boot normal de Linux, no es un
+# prompt). Eso causaba un falso positivo: el script creia haber interrumpido
+# el arranque en U-Boot cuando en realidad el Tross seguia booteando Linux
+# solo, y el resto de los comandos se enviaban "al vacio". Anclamos el patron
+# a que "=>" este al inicio de una linea Y sea lo ultimo recibido hasta el
+# momento (fin del buffer), que es como se comporta un prompt real esperando
+# input.
+UBOOT_PROMPT = r"\r\n=> $"
+
+# Aviso que imprime el GATEWAY de consola del ZPE (Nodegrid) cuando nuestra
+# sesion quedo en modo solo-lectura y por lo tanto CUALQUIER tecla que
+# mandemos se descarta sin llegar al Tross. La toma de control automatica
+# (Ctrl-X, t) no siempre alcanza para resolverlo -- se ha visto en hardware
+# real que, una vez que la sesion cae en este estado, la unica recuperacion
+# conocida es apagar y encender el propio ZPE.
+ZPE_READONLY_MARKER = "[read-only -- use ^X t ? for help]"
+
+class _ZpeConsoleReadOnlyError(RuntimeError):
+    """Se levanta cuando la consola relay del ZPE devuelve el aviso de
+    solo-lectura de forma persistente (ver ZPE_READONLY_MARKER), indicando
+    que ninguna tecla enviada esta llegando realmente al Tross. TROSS_CONFIG()
+    la captura para pedirle al operador que reinicie (apague/encienda) el
+    ZPE y reintentar la configuracion completa desde cero."""
+    pass
+
+def _paced_sendline(child, line, delay=0.4):
+    """Envia una linea a la consola y espera un breve instante antes de que
+    el codigo continue. Es una medida adicional de robustez (evitar mandar
+    comandos pegados uno tras otro sin darle tiempo al equipo remoto de
+    procesarlos), complementaria a la correccion de fondo de esta funcion
+    (toma de control read-write + regex del prompt sin falsos positivos)."""
+    child.sendline(line)
+    time.sleep(delay)
 
 def _print_red_banner(message):
     """Imprime un mensaje resaltado en rojo, con borde, para alertas que
@@ -2167,14 +2299,61 @@ def _mac_plus_offset(mac, offset):
     parts[-1] = f"{last:02x}"
     return ":".join(parts)
 
-def _open_zpe_console_telnet(port, timeout=30):
+def _zpe_console_take_control(child):
+    """Los puertos de consola relay del ZPE (Nodegrid) se abren en modo
+    SOLO LECTURA por defecto: mientras el banner
+    '[read-only -- use ^X t ? for help]' este activo, CUALQUIER tecla que
+    enviemos (el spam de espacio para interrumpir el autoboot, los comandos
+    de U-Boot, el login, etc.) se descarta silenciosamente sin llegar al
+    Tross. Por eso, justo despues de conectar, hay que tomar control de
+    escritura con la secuencia Ctrl-X, t que el propio banner indica."""
+    print("[*] Tomando control de escritura de la consola (Ctrl-X, t)...")
+    child.send(chr(0x18))  # Ctrl-X
+    time.sleep(0.3)
+    child.send("t")
+    time.sleep(0.3)
+
+def _drain_buffered_output(child, idle_timeout=0.3):
+    """Descarta cualquier dato ya bufferizado en la sesion (por ejemplo, el
+    volcado de scrollback/historial que el ZPE envia de inmediato al
+    conectarse a un puerto de consola, que NO es output en vivo), leyendo de
+    forma no bloqueante hasta que no llegue nada nuevo durante 'idle_timeout'.
+    Asi arrancamos 'limpios' antes de empezar a interpretar el stream."""
+    try:
+        while True:
+            child.read_nonblocking(size=65536, timeout=idle_timeout)
+    except pexpect.exceptions.TIMEOUT:
+        pass
+    except pexpect.exceptions.EOF:
+        pass
+
+def _open_zpe_console_telnet(port, timeout=45, take_control=False):
     """Abre una sesion telnet hacia el puerto serial relay del ZPE (Nodegrid),
     usado para acceder a la consola del Tross conectado fisicamente al puerto
-    17 del ZPE (telnet 10.0.0.253 7017)."""
+    17 del ZPE (telnet 10.0.0.253 7017).
+
+    take_control=True manda la secuencia Ctrl-X, t (ver
+    _zpe_console_take_control) inmediatamente despues de conectar. Esto SOLO
+    debe pedirse cuando la conexion se abre justo antes de un boot en vivo
+    (la consola todavia no tiene un prompt interactivo esperando input, asi
+    que cualquier tecla de mas se pierde inofensivamente en el stream de
+    arranque). Con take_control=False (default, para reconectar a una sesion
+    que puede estar idle en un prompt real como '=>' o 'root@:'), NO se manda
+    nada a ciegas: enviar Ctrl-X/t sobre un prompt idle contamina el buffer
+    de comandos del Tross (quedaria un '=> t' pendiente en vez de '=> '),
+    rompiendo la deteccion de prompts. La toma de control reactiva (solo si
+    se detecta el aviso de solo-lectura) vive en _tross_ensure_logged_in."""
     cmd = f"telnet 10.0.0.253 {port}"
     print(f"[CMD Interactive] {cmd}")
     child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=timeout)
     child.logfile_read = sys.stdout
+    # Esperamos a que el cliente telnet confirme la conexion antes de mandar
+    # cualquier tecla, para no perder la secuencia de toma de control en
+    # medio del handshake de conexion.
+    child.expect([r"Escape character is", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+    if take_control:
+        _zpe_console_take_control(child)
+    _drain_buffered_output(child)
     return child
 
 def _zpe_console_exit(child):
@@ -2188,7 +2367,7 @@ def _zpe_console_exit(child):
         child.send(chr(0x1D))  # Ctrl+5
         time.sleep(0.5)
         child.sendline("q")
-        child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=10)
+        child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=15)
     except Exception as e:
         print(f"[!] Advertencia: no se pudo confirmar la salida limpia de la consola del ZPE ({e}).")
     finally:
@@ -2198,28 +2377,84 @@ def _zpe_console_exit(child):
             pass
         os.system("clear")
 
-def _uboot_break_spam(child, max_seconds=120):
-    """Interrumpe el arranque del Tross 'spameando' espacio hasta que
-    aparezca el prompt '=>' de U-Boot."""
-    print("[*] Interrumpiendo el arranque del Tross (spam de espacio) hasta obtener el prompt '=>' de U-Boot...")
-    deadline = time.time() + max_seconds
+def _uboot_break_spam(child, max_seconds=180, spam_window=25):
+    """Interrumpe el arranque del Tross.
+
+    IMPORTANTE: mandar espacio a ciegas desde el inicio del arranque (DDR
+    init, deteccion de red, etc.) no logra interrumpir el autoboot -- la
+    ventana real donde U-Boot escucha el teclado es 'Hit any key to stop
+    autoboot:  N ... 0', que dura solo unos pocos segundos. Por eso esta
+    funcion primero ESPERA EN SILENCIO (sin mandar ninguna tecla) hasta LEER
+    literalmente ese mensaje, y recien en ese momento prueba varias teclas
+    "seguras" de interrupcion (ver nota abajo) durante 'spam_window'
+    segundos, maximizando las chances de capturar la ventana real."""
+    print("[*] Esperando (sin enviar teclas aun) el mensaje 'Hit any key to stop autoboot:' del Tross...")
+    idx = child.expect([r"Hit any key to stop autoboot", pexpect.TIMEOUT, pexpect.EOF], timeout=max_seconds)
+    if idx != 0:
+        print_ascii_fail("No se recibio el mensaje 'Hit any key to stop autoboot:' del Tross.")
+        raise RuntimeError("Timeout esperando 'Hit any key to stop autoboot:' en el Tross.")
+
+    print("[✓] 'Hit any key to stop autoboot:' detectado. Probando teclas de interrupcion...")
+    # NOTA: se probaron dos aproximaciones que NO funcionaron:
+    #  - Espacio: el propio U-Boot lo recibe pero lo rechaza EXPLICITAMENTE
+    #    (imprime "ignored]") y el autoboot sigue su curso normalmente.
+    #  - Ctrl-C: nunca llega al Tross -- el GATEWAY de consola del ZPE
+    #    (Nodegrid) lo intercepta como hotkey propio y CIERRA la sesion
+    #    (imprime "disconnect]", cae a su prompt local
+    #    "[NONE@nodegrid ttyS17]#" y cierra la conexion TCP). El
+    #    "Press Ctrl-C to run Shmoo" que aparece antes en el boot es para un
+    #    paso totalmente distinto (calibracion DDR/Shmoo), no para el
+    #    autoboot. Por eso Ctrl-C (y en general cualquier tecla de control
+    #    tipo Ctrl-X/Ctrl-]/Ctrl-5) queda descartado: puede ser interceptado
+    #    por el gateway antes de llegar al equipo.
+    # Se prueban entonces teclas "normales" (no de control) durante la misma
+    # ventana: Enter primero (la alternativa mas comun para este tipo de
+    # prompt), y espacio como respaldo.
+    candidate_keys = ["\r", " "]
+    deadline = time.time() + spam_window
+    i = 0
     while time.time() < deadline:
-        child.send(" ")
-        idx = child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=1)
+        key = candidate_keys[i % len(candidate_keys)]
+        i += 1
+        child.send(key)
+        idx = child.expect([UBOOT_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=0.2)
         if idx == 0:
             print("[✓] Prompt '=>' de U-Boot detectado.")
             return
-    print_ascii_fail("No se logro interrumpir el arranque del Tross (nunca aparecio el prompt '=>').")
-    raise RuntimeError("Timeout interrumpiendo el arranque del Tross via U-Boot.")
+        if idx == 2:
+            print_ascii_fail(
+                "La sesion de consola se cerro inesperadamente al intentar interrumpir el "
+                "autoboot (posible tecla reservada por el gateway del ZPE)."
+            )
+            raise RuntimeError("EOF inesperado interrumpiendo el autoboot del Tross.")
+        # idx == 1 (TIMEOUT): revisamos si lo que se acumulo en el buffer
+        # contiene el aviso de sesion solo-lectura del gateway del ZPE. Si
+        # aparece, ninguna tecla que mandemos esta llegando de verdad al
+        # Tross -- no tiene sentido seguir intentando hasta agotar
+        # 'spam_window'. Cortamos aqui mismo con una excepcion dedicada para
+        # que TROSS_CONFIG() dispare la recuperacion (reiniciar el ZPE).
+        if ZPE_READONLY_MARKER in (child.before or ""):
+            print_ascii_fail(
+                "La consola del ZPE quedo en modo solo-lectura: ninguna tecla llega al Tross."
+            )
+            raise _ZpeConsoleReadOnlyError(
+                "La consola relay del ZPE esta en modo solo-lectura (aviso "
+                f"'{ZPE_READONLY_MARKER}' detectado)."
+            )
+    print_ascii_fail(
+        "Se detecto 'Hit any key to stop autoboot:' pero no se logro interrumpir el "
+        "arranque (nunca aparecio el prompt '=>')."
+    )
+    raise RuntimeError("No se pudo interrumpir el autoboot del Tross a tiempo.")
 
-def _uboot_cmd_check(child, cmd, expected_substrings, timeout=30, fail_msg=None):
+def _uboot_cmd_check(child, cmd, expected_substrings, timeout=45, fail_msg=None):
     """Envia 'cmd' en U-Boot y valida que TODAS las cadenas en
     'expected_substrings' (str o lista) aparezcan en la respuesta antes del
     siguiente prompt '=>'. Si no, banner de fallo + RuntimeError."""
     if isinstance(expected_substrings, str):
         expected_substrings = [expected_substrings]
     print(f"[CMD U-Boot] {cmd}")
-    child.sendline(cmd)
+    _paced_sendline(child, cmd)
     idx = child.expect([UBOOT_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=timeout)
     output = child.before or ""
     if idx != 0 or not all(s in output for s in expected_substrings):
@@ -2243,7 +2478,43 @@ def _wait_for_pattern_with_enters(child, pattern, max_seconds, interval=5, label
             return True
         if idx == 2:
             return False
+        if ZPE_READONLY_MARKER in (child.before or ""):
+            print_ascii_fail(
+                "La consola del ZPE quedo en modo solo-lectura: ninguna tecla llega al Tross."
+            )
+            raise _ZpeConsoleReadOnlyError(
+                "La consola relay del ZPE esta en modo solo-lectura (aviso "
+                f"'{ZPE_READONLY_MARKER}' detectado)."
+            )
         elapsed += interval
+        sys.stdout.write(f"\r{GREEN}[{label}] Tiempo transcurrido: {elapsed}s (max {max_seconds}s)...{RESET}")
+        sys.stdout.flush()
+    sys.stdout.write(f"\r{GREEN}[{label}] Tiempo agotado tras {max_seconds}s.{' ' * 20}{RESET}\n")
+    return False
+
+def _wait_silently_for_pattern(child, pattern, max_seconds, poll_interval=5, label="Esperando"):
+    """Como _wait_for_pattern_with_enters, pero SIN mandar ninguna tecla
+    mientras espera -- solo escucha. Es lo que corresponde despues de un
+    'reset' real que dispara la ventana 'Hit any key to stop autoboot':
+    CUALQUIER tecla enviada durante esa ventana (incluido un simple ENTER en
+    blanco) cuenta como interrupcion del autoboot y deja al Tross parado en
+    el prompt '=>' de U-Boot en vez de arrancar Linux solo. Esto es
+    exactamente lo que pasaba antes: _wait_for_pattern_with_enters mandaba un
+    ENTER a los 5 segundos de reiniciar, que caia justo en medio de esa
+    ventana y abortaba el autoboot. Muestra un contador en verde mientras
+    dura la espera. Devuelve True si aparecio el patron, False si se agoto
+    el tiempo."""
+    GREEN = "\033[92m"
+    RESET = "\033[0m"
+    elapsed = 0
+    while elapsed < max_seconds:
+        idx = child.expect([pattern, pexpect.TIMEOUT, pexpect.EOF], timeout=poll_interval)
+        if idx == 0:
+            sys.stdout.write(f"\r{GREEN}[{label}] Completado en {elapsed}s.{' ' * 20}{RESET}\n")
+            return True
+        if idx == 2:
+            return False
+        elapsed += poll_interval
         sys.stdout.write(f"\r{GREEN}[{label}] Tiempo transcurrido: {elapsed}s (max {max_seconds}s)...{RESET}")
         sys.stdout.flush()
     sys.stdout.write(f"\r{GREEN}[{label}] Tiempo agotado tras {max_seconds}s.{' ' * 20}{RESET}\n")
@@ -2260,7 +2531,7 @@ def _run_tross_cmd_and_wait(child, cmd, max_wait_seconds, poll_interval=5, label
     GREEN = "\033[92m"
     RESET = "\033[0m"
     print(f"[CMD Tross] {cmd}")
-    child.sendline(cmd)
+    _paced_sendline(child, cmd)
     elapsed = 0
     while True:
         idx = child.expect([prompt_pattern, pexpect.TIMEOUT, pexpect.EOF], timeout=poll_interval)
@@ -2270,6 +2541,14 @@ def _run_tross_cmd_and_wait(child, cmd, max_wait_seconds, poll_interval=5, label
         if idx == 2:
             print_ascii_fail(f"La sesion del Tross se cerro inesperadamente durante '{cmd}'.")
             raise RuntimeError(f"EOF inesperado esperando la finalizacion de '{cmd}'.")
+        if ZPE_READONLY_MARKER in (child.before or ""):
+            print_ascii_fail(
+                "La consola del ZPE quedo en modo solo-lectura: ninguna tecla llega al Tross."
+            )
+            raise _ZpeConsoleReadOnlyError(
+                "La consola relay del ZPE esta en modo solo-lectura (aviso "
+                f"'{ZPE_READONLY_MARKER}' detectado)."
+            )
         elapsed += poll_interval
         sys.stdout.write(f"\r{GREEN}[{label}] Tiempo transcurrido: {elapsed}s (max {max_wait_seconds}s)...{RESET}")
         sys.stdout.flush()
@@ -2311,6 +2590,149 @@ def _run_local_cmd_with_wait(cmd, max_wait_seconds, poll_interval=10, label="Esp
             print_ascii_fail(f"Timeout esperando que finalice '{cmd}'.")
             raise RuntimeError(f"Timeout ({max_wait_seconds}s) esperando la finalizacion de '{cmd}'.")
 
+def _tross_do_login(child):
+    """Ingresa las credenciales root/google en el prompt 'login:' del Tross
+    y deja la sesion en TROSS_PROMPT. Factorizado porque se usa desde varias
+    etapas (boot inicial, tras 'reset' post-imager, y desde el resumen de
+    sesion _tross_ensure_logged_in)."""
+    print("[*] Ingresando credenciales de login (root / google)...")
+    _paced_sendline(child, "root")
+    idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+    if idx != 0:
+        print_ascii_fail()
+        raise RuntimeError("No se recibio el prompt 'Password:' del Tross tras el usuario 'root'.")
+    _paced_sendline(child, "google")
+    idx = child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+    if idx != 0:
+        print_ascii_fail()
+        raise RuntimeError("No se pudo iniciar sesion en el Tross (root/google).")
+
+def _tross_netboot_and_login(child):
+    """Desde el prompt '=>' de U-Boot, corre el boot por red (netboot) hacia
+    el kernel del Tross, espera el prompt 'login:' y loguea. Se asume que el
+    U-Boot ya fue flasheado (etapa 'tross_uboot_flashed')."""
+    _paced_sendline(
+        child, "setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254"
+    )
+    child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=20)
+    _paced_sendline(child, "setenv serverip 10.0.0.254")
+    child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=20)
+    _paced_sendline(child, "setenv goog_boot netboot;setenv verify-sig 0;run set_ramboot")
+    child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=20)
+    print("[CMD U-Boot] tftpboot 0x70000000 tross/combined.uImage;run boot_kernel")
+    _paced_sendline(child, "tftpboot 0x70000000 tross/combined.uImage;run boot_kernel")
+
+    if not _wait_for_pattern_with_enters(child, r"login:", max_seconds=180, interval=5,
+                                          label="Esperando prompt 'login:' del Tross"):
+        print_ascii_fail("No se recibio el prompt 'login:' del Tross tras el boot por red.")
+        raise RuntimeError("Timeout esperando el prompt 'login:' del Tross.")
+
+    _tross_do_login(child)
+
+def _tross_ensure_logged_in(child):
+    """Punto de entrada comun para las etapas que necesitan al Tross
+    logueado (TROSS_PROMPT) al reconectar la consola -- ya sea por primera
+    vez en la etapa, o al RESUMIR una corrida anterior que fallo a mitad de
+    camino. Detecta en que estado quedo la sesion y hace lo minimo necesario
+    para llegar a un prompt de shell logueado:
+      - Ya esta en TROSS_PROMPT -> no hace nada.
+      - Esta en 'login:' (Linux ya booteo) -> loguea directamente.
+      - Esta en '=>' de U-Boot (nunca arranco Linux, o se reinicio) -> corre
+        el netboot completo y loguea.
+    Nota: si el '=>' aparece por una razon distinta a 'nunca booteo Linux'
+    (por ejemplo, a mitad de la etapa de guardado de bootenv), esta funcion
+    igual hace un netboot valido y logueado -- de mas esta decir que cuesta
+    un ciclo de boot extra, pero el resultado final sigue siendo correcto.
+
+    IMPORTANTE: el primer sondeo NO manda la secuencia de toma de control
+    (Ctrl-X, t) a ciegas -- mandarla sobre un prompt idle real (como '=>')
+    contamina su buffer de comandos con una 't' suelta, y eso es justamente
+    lo que rompia el sondeo en versiones anteriores. Solo se intenta la toma
+    de control, una vez, de forma REACTIVA, si el sondeo no reconoce ningun
+    estado Y se ve el aviso de solo-lectura del gateway del ZPE en el buffer;
+    si aun asi sigue sin reconocerse, se escala a _ZpeConsoleReadOnlyError
+    para que TROSS_CONFIG() dispare la recuperacion conocida (reiniciar el
+    ZPE), en vez de fallar con un error generico.
+
+    Tambien evita, por las dudas, el mismo bug que 'reset' + enviar teclas
+    a ciegas causaba en _tross_stage_bootenv: si al reconectar justo caemos
+    en medio de un reboot real (por ejemplo, resumiendo una corrida que se
+    corto justo despues de mandar 'reset'), un simple ENTER de sondeo podria
+    caer en la ventana 'Hit any key to stop autoboot' e interrumpir el
+    autoboot sin querer. Por eso se escucha primero, en silencio, un ratito
+    antes de mandar nada."""
+    idx = child.expect([
+        TROSS_PROMPT, r"login:", UBOOT_PROMPT, r"Hit any key to stop autoboot",
+        pexpect.TIMEOUT, pexpect.EOF
+    ], timeout=5)
+    if idx == 3:
+        print("[!] Se detecto la ventana 'Hit any key to stop autoboot' al reconectar. "
+              "Esperando en silencio a que el autoboot termine solo...")
+        if not _wait_silently_for_pattern(child, r"login:", max_seconds=210, poll_interval=5,
+                                           label="Esperando 'login:' (autoboot en curso al reconectar)"):
+            print_ascii_fail("No se recibio el prompt 'login:' tras esperar el autoboot al reconectar.")
+            raise RuntimeError("Timeout esperando 'login:' tras reconectar en plena ventana de autoboot.")
+        _tross_do_login(child)
+        return
+    if idx == 0:
+        print("[=] La sesion del Tross ya estaba logueada.")
+        return
+    if idx == 1:
+        print("[*] La sesion del Tross esta en el prompt 'login:'. Ingresando credenciales...")
+        _tross_do_login(child)
+        return
+    if idx == 2:
+        print("[*] La sesion del Tross esta en el prompt '=>' de U-Boot. Booteando Linux por red...")
+        _tross_netboot_and_login(child)
+        return
+
+    # idx in (4, 5): TIMEOUT o EOF en el sondeo pasivo -- recien aca vale la
+    # pena mandar un ENTER para ver si hay un prompt esperando que no se
+    # refresco solo (fuera de la ventana de autoboot, esto es inofensivo).
+    _paced_sendline(child, "")
+    idx = child.expect([TROSS_PROMPT, r"login:", UBOOT_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+    if idx == 0:
+        print("[=] La sesion del Tross ya estaba logueada.")
+        return
+    if idx == 1:
+        print("[*] La sesion del Tross esta en el prompt 'login:'. Ingresando credenciales...")
+        _tross_do_login(child)
+        return
+    if idx == 2:
+        print("[*] La sesion del Tross esta en el prompt '=>' de U-Boot. Booteando Linux por red...")
+        _tross_netboot_and_login(child)
+        return
+
+    saw_readonly = ZPE_READONLY_MARKER in (child.before or "")
+    if saw_readonly:
+        print("[!] Se detecto el aviso de sesion solo-lectura. Reintentando toma de control (Ctrl-X, t)...")
+        _zpe_console_take_control(child)
+        _drain_buffered_output(child)
+        _paced_sendline(child, "")
+        idx = child.expect([TROSS_PROMPT, r"login:", UBOOT_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+        if idx == 0:
+            print("[=] La sesion del Tross ya estaba logueada.")
+            return
+        if idx == 1:
+            print("[*] La sesion del Tross esta en el prompt 'login:'. Ingresando credenciales...")
+            _tross_do_login(child)
+            return
+        if idx == 2:
+            print("[*] La sesion del Tross esta en el prompt '=>' de U-Boot. Booteando Linux por red...")
+            _tross_netboot_and_login(child)
+            return
+        if ZPE_READONLY_MARKER in (child.before or ""):
+            print_ascii_fail(
+                "La consola del ZPE sigue en modo solo-lectura tras reintentar la toma de control."
+            )
+            raise _ZpeConsoleReadOnlyError(
+                "La consola relay del ZPE esta en modo solo-lectura (aviso "
+                f"'{ZPE_READONLY_MARKER}' detectado) tras reconectar."
+            )
+
+    print_ascii_fail("No se pudo determinar el estado actual de la sesion del Tross al reconectar.")
+    raise RuntimeError("Estado desconocido de la sesion del Tross al reconectar.")
+
 def _tross_reconfigure_zpe_eth1():
     """Se conecta por SSH a admin@10.0.0.253 (ZPE) y configura ETH1 en modo
     estatico (10.0.0.253/8, gateway 10.0.0.254), validando el 'show' contra
@@ -2327,11 +2749,11 @@ def _tross_reconfigure_zpe_eth1():
         r"[Pp]assword:",
         pexpect.TIMEOUT,
         pexpect.EOF
-    ], timeout=30)
+    ], timeout=45)
 
     if idx == 0:
         child.sendline("yes")
-        idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+        idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=45)
         if idx != 0:
             print_ascii_fail()
             raise RuntimeError("No se recibio el prompt de password SSH del ZPE tras aceptar el fingerprint.")
@@ -2341,7 +2763,7 @@ def _tross_reconfigure_zpe_eth1():
 
     print("[*] Enviando password 'admin'...")
     child.sendline("admin")
-    idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+    idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=45)
     if idx != 0:
         print_ascii_fail()
         raise RuntimeError("No se pudo autenticar por SSH contra el ZPE (10.0.0.253).")
@@ -2355,14 +2777,14 @@ def _tross_reconfigure_zpe_eth1():
     ]
     for cmd in commands:
         child.sendline(cmd)
-        idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
         if idx != 0:
             print_ascii_fail()
             child.close(force=True)
             raise RuntimeError(f"El ZPE no respondio como se esperaba tras el comando '{cmd}'.")
 
     child.sendline("show")
-    idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+    idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
     if idx != 0:
         print_ascii_fail()
         child.close(force=True)
@@ -2389,7 +2811,7 @@ def _tross_reconfigure_zpe_eth1():
     print("[✓] Configuracion de ETH1 validada correctamente.")
 
     child.sendline("commit")
-    child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+    child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=45)
 
     child.sendline("exit")
     idx = child.expect([
@@ -2397,10 +2819,10 @@ def _tross_reconfigure_zpe_eth1():
         r"#\s",
         pexpect.TIMEOUT,
         pexpect.EOF
-    ], timeout=15)
+    ], timeout=20)
     if idx == 0:
         child.sendline("yes")
-        child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=15)
+        child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=20)
 
     child.close(force=True)
     print("[✓] Sesion SSH hacia el ZPE cerrada.")
@@ -2410,22 +2832,48 @@ def TROSS_CONFIG():
     lo bootea y flashea via consola serial (relay del puerto 17 del ZPE),
     reconfigura la red del ZPE (ETH1 estatica), obtiene el 'lease' de red del
     Tross a partir de las leases del ZPE, y corre el flasheo/actualizacion de
-    firmware con vrmu_util."""
-    if is_step_completed("TROSS_CONFIG"):
+    firmware con vrmu_util.
+
+    Si la consola del ZPE queda atascada en modo solo-lectura (ver
+    ZPE_READONLY_MARKER / _ZpeConsoleReadOnlyError), la unica recuperacion
+    conocida en hardware real es reiniciar (apagar/encender) el propio ZPE.
+    Por eso esta funcion es un wrapper con reintento: ante ese error puntual,
+    sale de la consola (ya lo hace el 'finally' interno), le pide al
+    operador que reinicie fisicamente el ZPE, espera su confirmacion (ENTER),
+    da un minuto de margen para que el ZPE termine de levantar, y vuelve a
+    llamar a _tross_config_attempt(). Como cada etapa interna tiene su propia
+    bandera en provisioning_state.json, este reintento NO repite las etapas
+    ya completadas -- retoma justo en la que fallo. Cualquier otro tipo de
+    error se sigue propagando normalmente (no se reintenta a ciegas)."""
+    if is_tross_step_completed("TROSS_CONFIG"):
         print("[=] Paso 'TROSS_CONFIG' ya fue ejecutado previamente. Omitiendo...")
         return
 
-    print("--- PASO: TROSS_CONFIG - Configuracion automatica del Tross ---")
+    while True:
+        try:
+            _tross_config_attempt()
+            return
+        except _ZpeConsoleReadOnlyError as e:
+            print(f"[!] {e}")
+            _print_red_banner(
+                "La consola del ZPE quedo atascada en modo solo-lectura y no se pudo "
+                "recuperar automaticamente.\n"
+                "\n"
+                "Por favor reinicie (apague y encienda) el propio ZPE y presione ENTER "
+                "en cuanto haya vuelto a encender."
+            )
+            input("Presione ENTER despues de reiniciar el ZPE...")
+            _green_wait(60, "Esperando a que el ZPE termine de levantar")
+            print("[*] Reintentando TROSS_CONFIG (retomando en la ultima etapa pendiente)...")
 
-    state = load_state()
-    tross_mac = state.get("config", {}).get("tross_mac")
-    if not tross_mac:
-        raise RuntimeError(
-            "No se encontro 'tross_mac' en el estado. Asegurate de correr "
-            "'tross_capture_mac' antes de 'TROSS_CONFIG'."
-        )
+def _tross_stage_dhcp(tross_mac):
+    """ETAPA 1/11: aplicar la MAC del Tross en /etc/dhcp/dhcpd.conf y
+    reiniciar los servicios DHCP."""
+    if is_tross_step_completed("tross_dhcp_applied"):
+        print("[=] Etapa 'tross_dhcp_applied' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 1/11: Aplicar la MAC del Tross en /etc/dhcp/dhcpd.conf ---")
 
-    # --- PASO 0: Asegurar que /etc/dhcp/dhcpd.conf tenga la MAC del Tross ---
     print(f"[*] Asegurando que /etc/dhcp/dhcpd.conf tenga la MAC del Tross ({tross_mac})...")
     new_line = f"host tross {{ hardware ethernet {tross_mac}; fixed-address 10.0.0.251; }}"
     sed_cmd = (
@@ -2439,32 +2887,52 @@ def TROSS_CONFIG():
     run_interactive("sudo systemctl restart isc-dhcp-server")
     run_interactive("sudo systemctl restart isc-dhcp-server6")
 
-    # --- PASO 1: Prompt interactivo (amarillo) para conectar el cable consola ---
+    mark_tross_step_completed("tross_dhcp_applied")
+
+def _tross_stage_flash_uboot():
+    """ETAPA 2/11: conectar la consola, pedir el reinicio fisico manual del
+    Tross, interrumpir el autoboot, flashear U-Boot (sf probe/erase/write/
+    erase) y confirmar que el equipo vuelve a quedar vivo en el prompt '=>'."""
+    if is_tross_step_completed("tross_uboot_flashed"):
+        print("[=] Etapa 'tross_uboot_flashed' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 2/11: Interrumpir el arranque y flashear U-Boot del Tross ---")
+
     _print_yellow_banner(
         "Conecte un cable consola (TROSS) al puerto CONSOLE del TROSS y el "
         "otro extremo al puerto 17 del ZPE."
     )
     input("Presione ENTER para continuar...")
 
-    child = _open_zpe_console_telnet(7017)
-
+    child = _open_zpe_console_telnet(7017, take_control=True)
     try:
-        # --- PASO 2: Interrumpir el arranque hasta el prompt '=>' de U-Boot ---
+        # Al conectar, el puerto de consola del ZPE vuelca de inmediato el
+        # SCROLLBACK del ultimo boot (no es en vivo). Por eso pedimos el
+        # reinicio fisico manual recien ahora que ya estamos conectados y con
+        # control de escritura tomado, garantizando que lo que sigue es un
+        # boot real y en vivo.
+        _print_yellow_banner(
+            "Ya se establecio la conexion a la consola del Tross. Ahora reinicie "
+            "FISICAMENTE el Tross de forma manual (apague y encienda, o presione "
+            "el boton de reset) y presione ENTER en cuanto lo haya hecho."
+        )
+        input("Presione ENTER despues de reiniciar manualmente el Tross...")
+
         _uboot_break_spam(child)
 
-        # --- PASO 3 (paso1 del runbook): tftpboot del uboot, con reintento
-        # completo del bloque si la respuesta no coincide con lo esperado ---
+        # --- tftpboot del uboot, con reintento completo del bloque si la
+        # respuesta no coincide con lo esperado ---
         while True:
-            child.sendline(
-                "setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254"
+            _paced_sendline(
+                child, "setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254"
             )
-            child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
-            child.sendline("setenv serverip 10.0.0.254")
-            child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+            child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=20)
+            _paced_sendline(child, "setenv serverip 10.0.0.254")
+            child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=20)
 
             print("[CMD U-Boot] tftpboot 0x60000000 tross/uboot_planet-hurricane3.bin")
-            child.sendline("tftpboot 0x60000000 tross/uboot_planet-hurricane3.bin")
-            idx = child.expect([r"Load address: 0x60000000", pexpect.TIMEOUT, pexpect.EOF], timeout=60)
+            _paced_sendline(child, "tftpboot 0x60000000 tross/uboot_planet-hurricane3.bin")
+            idx = child.expect([r"Load address: 0x60000000", pexpect.TIMEOUT, pexpect.EOF], timeout=90)
             output = child.before or ""
             required = [
                 "Change GMAC speed to 1000MB",
@@ -2475,11 +2943,10 @@ def TROSS_CONFIG():
             ]
             if idx == 0 and all(m in output for m in required):
                 print("[✓] Respuesta de 'tftpboot' (paso1) validada correctamente.")
-                child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+                child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=20)
                 break
             print("[!] La respuesta de 'tftpboot' no cumplio lo esperado (paso1). Reintentando paso1...")
 
-        # --- PASO 4 (paso2 del runbook): sf probe/erase/write/erase + reset ---
         _uboot_cmd_check(
             child, "sf probe",
             "SF: Detected MX25L12805 with page size 256 Bytes, erase size 64 KiB, total 16 MiB"
@@ -2498,46 +2965,31 @@ def TROSS_CONFIG():
         )
 
         print("[CMD U-Boot] reset")
-        child.sendline("reset")
+        _paced_sendline(child, "reset")
         _uboot_break_spam(child)
+        print("[✓] U-Boot flasheado; el Tross quedo esperando en el prompt '=>'.")
+    finally:
+        _zpe_console_exit(child)
 
-        # --- PASO 5: Booteo por red (netboot) hacia el kernel del Tross ---
-        child.sendline(
-            "setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254"
-        )
-        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
-        child.sendline("setenv serverip 10.0.0.254")
-        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
-        child.sendline("setenv goog_boot netboot;setenv verify-sig 0;run set_ramboot")
-        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
-        print("[CMD U-Boot] tftpboot 0x70000000 tross/combined.uImage;run boot_kernel")
-        child.sendline("tftpboot 0x70000000 tross/combined.uImage;run boot_kernel")
+    mark_tross_step_completed("tross_uboot_flashed")
 
-        # --- PASO 6: Esperar ~2 minutos, dando ENTER cada 5s, hasta 'login:' ---
-        if not _wait_for_pattern_with_enters(child, r"login:", max_seconds=120, interval=5,
-                                              label="Esperando prompt 'login:' del Tross"):
-            print_ascii_fail("No se recibio el prompt 'login:' del Tross tras el boot por red.")
-            raise RuntimeError("Timeout esperando el prompt 'login:' del Tross.")
+def _tross_stage_boot_linux():
+    """ETAPA 3/11: bootear Linux por red desde el '=>' de U-Boot, loguear y
+    validar la version de kernel (uname -a)."""
+    if is_tross_step_completed("tross_linux_booted"):
+        print("[=] Etapa 'tross_linux_booted' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 3/11: Bootear Linux por red y validar el kernel ---")
 
-        # --- PASO 7: Login ---
-        print("[*] Ingresando credenciales de login (root / google)...")
-        child.sendline("root")
-        idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
-        if idx != 0:
-            print_ascii_fail()
-            raise RuntimeError("No se recibio el prompt 'Password:' del Tross tras el usuario 'root'.")
-        child.sendline("google")
-        idx = child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
-        if idx != 0:
-            print_ascii_fail()
-            raise RuntimeError("No se pudo iniciar sesion en el Tross (root/google).")
+    child = _open_zpe_console_telnet(7017)
+    try:
+        _tross_ensure_logged_in(child)
 
-        # --- PASO 8: killall rcS; uname -a ---
-        child.sendline("killall rcS")
-        child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        _paced_sendline(child, "killall rcS")
+        child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=30)
 
         _run_tross_cmd_and_wait(
-            child, "uname -a", max_wait_seconds=20, poll_interval=5,
+            child, "uname -a", max_wait_seconds=30, poll_interval=5,
             label="Validando kernel del Tross"
         )
         uname_output = child.before or ""
@@ -2545,19 +2997,38 @@ def TROSS_CONFIG():
             print_ascii_fail("La version de kernel del Tross no coincide con la esperada (uname -a).")
             raise RuntimeError("Validacion de 'uname -a' fallo en el Tross.")
         print("[✓] Kernel del Tross validado (4.19.238-planet-hurricane3 #1).")
+    finally:
+        _zpe_console_exit(child)
 
-        # --- PASO 9: cd /tmp; descargar imageset.tgz por tftp, con reintento
-        # en caso de mismatch de MAC (loop hasta que no falle) ---
-        child.sendline("cd /tmp")
-        child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=15)
+    mark_tross_step_completed("tross_linux_booted")
+
+def _tross_stage_download_imageset():
+    """ETAPA 4/11: descargar imageset.tgz por TFTP (con reintento ante
+    mismatch de MAC o timeout transitorio de red) y validar 'ls' + 'md5sum'."""
+    if is_tross_step_completed("tross_imageset_downloaded"):
+        print("[=] Etapa 'tross_imageset_downloaded' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 4/11: Descargar y validar imageset.tgz por TFTP ---")
+
+    child = _open_zpe_console_telnet(7017)
+    try:
+        _tross_ensure_logged_in(child)
+
+        _paced_sendline(child, "cd /tmp")
+        child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+
+        MAC_MISMATCH_MARKERS = ("server write failed", "Network is unreachable")
+        TRANSIENT_FAILURE_MARKERS = ("Retry limit exceeded", "server read timed out")
 
         while True:
             tftp_output = _run_tross_cmd_and_wait(
                 child, "tftp -g -r tross/imageset.tgz 10.0.0.254",
-                max_wait_seconds=180, poll_interval=5,
+                max_wait_seconds=240, poll_interval=5,
                 label="Descargando imageset.tgz por tftp"
             )
-            if "server write failed" in tftp_output or "Network is unreachable" in tftp_output:
+            is_mac_mismatch = any(m in tftp_output for m in MAC_MISMATCH_MARKERS)
+            is_transient_failure = any(m in tftp_output for m in TRANSIENT_FAILURE_MARKERS)
+            if is_mac_mismatch:
                 _print_red_banner(
                     "MAC del tross no coincide, porfavor corrijala en otra terminal con\n"
                     "\n"
@@ -2572,17 +3043,33 @@ def TROSS_CONFIG():
                 )
                 input("Presione ENTER para continuar...")
                 continue
+            if is_transient_failure:
+                # A diferencia del mismatch de MAC (rechazo inmediato y
+                # explicito del servidor), esto es un timeout: el Tross no
+                # recibio respuesta del servidor TFTP a tiempo. Se ha visto en
+                # hardware real acompañado de un corte momentaneo del link de
+                # red (eth0 Down/Up) durante la espera -- probablemente
+                # transitorio, no necesariamente un problema de configuracion.
+                _print_red_banner(
+                    "La descarga de imageset.tgz por TFTP fallo por timeout "
+                    "('Retry limit exceeded' / 'server read timed out'), no por "
+                    "mismatch de MAC. Puede deberse a un corte momentaneo de red.\n"
+                    "\n"
+                    "Verifique la conectividad de red hacia 10.0.0.254 si el problema "
+                    "persiste tras un par de reintentos, y de enter para reintentar "
+                    "la descarga..."
+                )
+                input("Presione ENTER para continuar...")
+                continue
             print("[✓] Descarga de imageset.tgz completada sin errores de red.")
             break
 
-        # --- PASO 10: Esperar 3 minutos hasta recuperar el prompt 'root@:/tmp' ---
-        if not _wait_for_pattern_with_enters(child, r"root@:/tmp", max_seconds=180, interval=5,
+        if not _wait_for_pattern_with_enters(child, r"root@:/tmp", max_seconds=240, interval=5,
                                               label="Esperando prompt 'root@:/tmp'"):
-            print_ascii_fail("No se recibio el prompt 'root@:/tmp' tras esperar 3 minutos.")
+            print_ascii_fail("No se recibio el prompt 'root@:/tmp' tras esperar 4 minutos.")
             raise RuntimeError("Timeout esperando el prompt 'root@:/tmp' del Tross.")
 
-        # --- PASO 11: ls ---
-        ls_output = _run_tross_cmd_and_wait(child, "ls", max_wait_seconds=20, poll_interval=5,
+        ls_output = _run_tross_cmd_and_wait(child, "ls", max_wait_seconds=30, poll_interval=5,
                                              label="Listando /tmp")
         expected_files = ["StatsWB.Flow.lock", "StatsWB.Port.lock", "core", "imageset.tgz", "sandcastle"]
         if not all(f in ls_output for f in expected_files):
@@ -2590,21 +3077,37 @@ def TROSS_CONFIG():
             raise RuntimeError("Validacion de 'ls' fallo en el Tross.")
         print("[✓] Listado de /tmp validado correctamente.")
 
-        # --- PASO 12: md5sum ---
         md5_output = _run_tross_cmd_and_wait(
-            child, "md5sum imageset.tgz", max_wait_seconds=30, poll_interval=5,
+            child, "md5sum imageset.tgz", max_wait_seconds=45, poll_interval=5,
             label="Calculando md5sum de imageset.tgz"
         )
         if "3e52decb2b76aa84f83c5ae97e520c77" not in md5_output:
             print_ascii_fail("El md5sum de imageset.tgz no coincide con el esperado.")
             raise RuntimeError("Validacion de 'md5sum' fallo en el Tross.")
         print("[✓] md5sum de imageset.tgz validado correctamente.")
+    finally:
+        _zpe_console_exit(child)
 
-        # --- PASO 13: Extraer e imagear (tar + imager), esperar ~20 minutos ---
+    mark_tross_step_completed("tross_imageset_downloaded")
+
+def _tross_stage_run_imager():
+    """ETAPA 5/11: extraer e imagear el Tross (tar + imager, ~20 minutos) y
+    validar el tail de la respuesta."""
+    if is_tross_step_completed("tross_imager_done"):
+        print("[=] Etapa 'tross_imager_done' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 5/11: Extraer e imagear el Tross (tar + imager, ~20 minutos) ---")
+
+    child = _open_zpe_console_telnet(7017)
+    try:
+        _tross_ensure_logged_in(child)
+        _paced_sendline(child, "cd /tmp")
+        child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+
         imager_output = _run_tross_cmd_and_wait(
             child,
             "tar Oxzf imageset.tgz tools-cf.tgz | tar xz && netconfig=no ./imager ab",
-            max_wait_seconds=1500, poll_interval=10,
+            max_wait_seconds=1800, poll_interval=10,
             label="Ejecutando imager (aprox. 20 minutos)"
         )
         required_tail = [
@@ -2620,97 +3123,145 @@ def TROSS_CONFIG():
             )
             raise RuntimeError("Validacion de la salida de 'imager' fallo en el Tross.")
         print("[✓] Imageo del Tross completado y validado correctamente.")
+    finally:
+        _zpe_console_exit(child)
 
-        # --- PASO 14: reboot + interrumpir arranque de nuevo ---
+    mark_tross_step_completed("tross_imager_done")
+
+def _tross_stage_bootenv():
+    """ETAPA 6/11: reiniciar el Tross, configurar bootcase_1/bootdelay,
+    guardar el entorno (saveenv) y volver a loguear tras el reset final."""
+    if is_tross_step_completed("tross_bootenv_saved"):
+        print("[=] Etapa 'tross_bootenv_saved' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 6/11: Guardar bootcase_1/bootdelay y volver a loguear ---")
+
+    child = _open_zpe_console_telnet(7017)
+    try:
+        _tross_ensure_logged_in(child)
+
         print("[CMD Tross] reboot")
-        child.sendline("reboot")
+        _paced_sendline(child, "reboot")
         _uboot_break_spam(child)
 
-        # --- PASO 15: Configurar bootcase_1 / bootdelay y guardar entorno ---
-        child.sendline('setenv bootcase_1 "bootcount 2;run pri_cf_bootcmd"')
-        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
-        child.sendline("setenv bootdelay 3")
-        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+        _paced_sendline(child, 'setenv bootcase_1 "bootcount 2;run pri_cf_bootcmd"')
+        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=20)
+        _paced_sendline(child, "setenv bootdelay 3")
+        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=20)
 
         _uboot_cmd_check(
             child, "saveenv",
             ["Saving Environment to SPI Flash...",
              "SF: Detected MX25L12805 with page size 256 Bytes, erase size 64 KiB, total 16 MiB",
              "Erasing SPI flash...Writing to SPI flash...done"],
-            timeout=30,
+            timeout=45,
             fail_msg="La respuesta de 'saveenv' no es la esperada. Se requiere atencion del operador."
         )
 
-        # --- PASO 16: reset y esperar login: ---
         print("[CMD U-Boot] reset")
-        child.sendline("reset")
-        if not _wait_for_pattern_with_enters(child, r"login:", max_seconds=120, interval=5,
-                                              label="Esperando prompt 'login:' tras reset"):
+        _paced_sendline(child, "reset")
+        # OJO: aca NO se usa _wait_for_pattern_with_enters. Ese helper manda
+        # un ENTER cada 5s, y el primero cae justo en medio de la ventana
+        # 'Hit any key to stop autoboot' que sigue a este reset -- un ENTER
+        # en blanco CUENTA como interrupcion del autoboot y deja al Tross
+        # parado en '=>' en vez de arrancar Linux solo (bug real que se vio
+        # en hardware: el equipo quedaba repitiendo '=>' sin parar). Por eso
+        # se espera en silencio con _wait_silently_for_pattern.
+        if not _wait_silently_for_pattern(child, r"login:", max_seconds=210, poll_interval=5,
+                                           label="Esperando prompt 'login:' tras reset (sin enviar teclas)"):
             print_ascii_fail("No se recibio el prompt 'login:' del Tross tras 'reset'.")
             raise RuntimeError("Timeout esperando el prompt 'login:' del Tross tras 'reset'.")
 
-        print("[*] Ingresando credenciales de login (root / google)...")
-        child.sendline("root")
-        idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
-        if idx != 0:
-            print_ascii_fail()
-            raise RuntimeError("No se recibio el prompt 'Password:' del Tross tras el usuario 'root'.")
-        child.sendline("google")
-        idx = child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
-        if idx != 0:
-            print_ascii_fail()
-            raise RuntimeError("No se pudo iniciar sesion en el Tross (root/google) tras 'reset'.")
-
+        _tross_do_login(child)
     finally:
-        # --- PASO 17: Salir de la consola relay del ZPE (Ctrl+5, q) ---
         _zpe_console_exit(child)
 
-    # --- PASO 18: Reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica) ---
+    mark_tross_step_completed("tross_bootenv_saved")
+
+def _tross_stage_zpe_eth1():
+    """ETAPA 7/11: reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica)."""
+    if is_tross_step_completed("tross_zpe_eth1_reconfigured"):
+        print("[=] Etapa 'tross_zpe_eth1_reconfigured' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 7/11: Reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica) ---")
+
     _tross_reconfigure_zpe_eth1()
 
-    # --- PASO 19: Reconectar por telnet a la consola del Tross y obtener
-    # el 'lease' de red a partir de las leases del ZPE ---
-    child2 = _open_zpe_console_telnet(7017)
-    try:
-        child2.sendline("")
-        idx = child2.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
-        if idx != 0:
-            print_ascii_fail()
-            raise RuntimeError(
-                "No se pudo reconectar a la consola del Tross via telnet tras reconfigurar el ZPE."
-            )
+    mark_tross_step_completed("tross_zpe_eth1_reconfigured")
 
-        leases_output = _run_tross_cmd_and_wait(
-            child2, "cat /mnt/region_config/dhcpd/dhcpd.rymden.leases",
-            max_wait_seconds=30, poll_interval=5, label="Leyendo leases del ZPE"
-        )
+def _tross_stage_lease(tross_mac):
+    """ETAPA 8/11: reconectar la consola del Tross, detectar su 'lease' de
+    red (a partir de las leases del ZPE) y validarlo con ping."""
+    if is_tross_step_completed("tross_lease_detected"):
+        print("[=] Etapa 'tross_lease_detected' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 8/11: Detectar el 'lease' de red del Tross y validarlo con ping ---")
+
+    child = _open_zpe_console_telnet(7017)
+    try:
+        _tross_ensure_logged_in(child)
 
         target_mac = _mac_plus_offset(tross_mac, 2)
         print(f"[*] Buscando el lease asociado a la MAC {target_mac} (tross_mac + 2)...")
-        blocks = re.findall(r"lease\s+([\d.]+)\s*\{(.*?)\n\}", leases_output, re.DOTALL)
-        matches = [ip for ip, body in blocks if target_mac.lower() in body.lower()]
+
+        # Justo despues de reconfigurar ETH1 del ZPE (etapa anterior), el
+        # Tross todavia puede no haber renovado su lease DHCP contra la red
+        # recien reconfigurada -- el archivo de leases puede aparecer vacio
+        # las primeras veces que se lee. Se reintenta con espera (contador
+        # verde) antes de darlo por fallido.
+        LEASE_WAIT_MAX_SECONDS = 180
+        LEASE_WAIT_POLL_SECONDS = 15
+        matches = []
+        elapsed = 0
+        while True:
+            leases_output = _run_tross_cmd_and_wait(
+                child, "cat /mnt/region_config/dhcpd/dhcpd.rymden.leases",
+                max_wait_seconds=45, poll_interval=5, label="Leyendo leases del ZPE"
+            )
+            blocks = re.findall(r"lease\s+([\d.]+)\s*\{(.*?)\n\}", leases_output, re.DOTALL)
+            matches = [ip for ip, body in blocks if target_mac.lower() in body.lower()]
+            if matches:
+                break
+            if elapsed >= LEASE_WAIT_MAX_SECONDS:
+                break
+            print(f"[=] Todavia no aparece un lease para {target_mac}; puede que el Tross aun no haya "
+                  f"renovado su DHCP contra la red recien reconfigurada. Reintentando en "
+                  f"{LEASE_WAIT_POLL_SECONDS}s (maximo {LEASE_WAIT_MAX_SECONDS}s)...")
+            _green_wait(LEASE_WAIT_POLL_SECONDS, "Esperando a que aparezca el lease del Tross")
+            elapsed += LEASE_WAIT_POLL_SECONDS
+
         if not matches:
             print_ascii_fail(f"No se encontro ningun lease asociado a la MAC {target_mac} en el ZPE.")
             raise RuntimeError("No se pudo determinar 'tross_lease' a partir de las leases del ZPE.")
 
         tross_lease = matches[-1]
         print(f"[+] tross_lease detectado: {tross_lease}")
-        _update_state_config({"tross_lease": tross_lease})
 
-        # --- PASO 20: Ping al tross_lease desde la consola del ZPE ---
         print(f"[*] Pingueando {tross_lease} desde la consola del ZPE...")
-        child2.sendline(f"ping -c 3 {tross_lease}")
-        idx = child2.expect([r"64 bytes from", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+        _paced_sendline(child, f"ping -c 3 {tross_lease}")
+        idx = child.expect([r"64 bytes from", pexpect.TIMEOUT, pexpect.EOF], timeout=45)
         if idx != 0:
             print_ascii_fail(f"No se recibio respuesta de ping desde {tross_lease}.")
             raise RuntimeError("Validacion de 'ping' al tross_lease fallo.")
-        child2.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=15)
+        child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
         print(f"[✓] Ping a {tross_lease} exitoso.")
     finally:
-        _zpe_console_exit(child2)
+        _zpe_console_exit(child)
 
-    # --- PASO 21: Flasheo del Tross via vrmu_util (comando repetido 2 veces,
-    # con espera de ~10 minutos y contador verde en cada corrida) ---
+    mark_tross_step_completed("tross_lease_detected", {"tross_lease": tross_lease})
+
+def _tross_stage_vrmu_flash(tross_lease):
+    """ETAPA 9/11: flasheo del Tross via vrmu_util (comando repetido 2
+    veces). El runbook exige esperar los 10 minutos COMPLETOS entre una
+    corrida y la siguiente, sin importar que el propio comando de vrmu_util
+    ya haya retornado antes -- el Tross sigue flasheando el firmware en
+    segundo plano durante ese tiempo, y mandar el segundo comando antes de
+    que termine podria interrumpirlo o pisar el flasheo en curso."""
+    if is_tross_step_completed("tross_vrmu_flash_done"):
+        print("[=] Etapa 'tross_vrmu_flash_done' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 9/11: Flasheo del Tross via vrmu_util (2 corridas, ~10 min c/u) ---")
+
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     home_dir = f"/home/{sudo_user}"
     flash_cmd = (
@@ -2719,14 +3270,35 @@ def TROSS_CONFIG():
         f"--envelope_enabled=false"
     )
 
-    for intento in (1, 2):
-        print(f"[*] Ejecutando vrmu_util (flash) - intento {intento}/2...")
-        _run_local_cmd_with_wait(
-            flash_cmd, max_wait_seconds=720, poll_interval=10,
-            label=f"vrmu_util flash (intento {intento}/2, aprox. 10 minutos)"
-        )
+    print("[*] Ejecutando vrmu_util (flash) - intento 1/2...")
+    _run_local_cmd_with_wait(
+        flash_cmd, max_wait_seconds=900, poll_interval=10,
+        label="vrmu_util flash (intento 1/2)"
+    )
 
-    # --- PASO 22: Actualizacion de firmware periferico via vrmu_util ---
+    # Espera FORZOSA de los 10 minutos completos, aunque el comando haya
+    # retornado mucho antes (se vio en hardware real que el CLI puede
+    # devolver el control en segundos, mientras el Tross sigue flasheando
+    # el firmware por su cuenta en segundo plano).
+    _green_wait(600, "Esperando los 10 minutos obligatorios antes de repetir el flash")
+
+    print("[*] Ejecutando vrmu_util (flash) - intento 2/2...")
+    _run_local_cmd_with_wait(
+        flash_cmd, max_wait_seconds=900, poll_interval=10,
+        label="vrmu_util flash (intento 2/2)"
+    )
+
+    mark_tross_step_completed("tross_vrmu_flash_done")
+
+def _tross_stage_vrmu_upgrade(tross_lease):
+    """ETAPA 10/11: actualizacion de firmware periferico via vrmu_util."""
+    if is_tross_step_completed("tross_vrmu_upgrade_done"):
+        print("[=] Etapa 'tross_vrmu_upgrade_done' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 10/11: Actualizacion de firmware periferico via vrmu_util ---")
+
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    home_dir = f"/home/{sudo_user}"
     upgrade_cmd = (
         f"cd {home_dir} && ./vrmu_util --envelope_enabled=false --hostname={tross_lease} "
         f"--logtostderr --api=/api/peripheral/upgrade "
@@ -2734,7 +3306,7 @@ def TROSS_CONFIG():
     )
     print("[*] Ejecutando vrmu_util (peripheral upgrade)...")
     upgrade_output, _ = _run_local_cmd_with_wait(
-        upgrade_cmd, max_wait_seconds=720, poll_interval=10,
+        upgrade_cmd, max_wait_seconds=900, poll_interval=10,
         label="vrmu_util peripheral upgrade"
     )
 
@@ -2750,8 +3322,96 @@ def TROSS_CONFIG():
         )
         raise RuntimeError("Respuesta inesperada de vrmu_util en 'peripheral upgrade'.")
 
+    mark_tross_step_completed("tross_vrmu_upgrade_done")
+
+def _tross_stage_vrmu_fw_version_check(tross_lease):
+    """ETAPA 11/11: verifica, via vrmu_util, que la version de firmware haya
+    quedado en 'b' (side activo tras el upgrade). Si sigue en 'a', el
+    upgrade no tomo efecto realmente y se considera una falla."""
+    if is_tross_step_completed("tross_vrmu_fw_version_checked"):
+        print("[=] Etapa 'tross_vrmu_fw_version_checked' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 11/11: Verificar version de firmware (fw-version) ---")
+
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    home_dir = f"/home/{sudo_user}"
+    fw_version_cmd = (
+        f"cd {home_dir} && ./vrmu_util --hostname={tross_lease} --envelope_enabled=false "
+        f"| grep -a4 fw-version"
+    )
+    print("[*] Ejecutando vrmu_util para verificar fw-version...")
+    fw_output, _ = _run_local_cmd_with_wait(
+        fw_version_cmd, max_wait_seconds=120, poll_interval=5,
+        label="Verificando fw-version"
+    )
+
+    if 'string_value: "b"' in fw_output:
+        print('[✓] Version de firmware validada correctamente (string_value: "b").')
+    elif 'string_value: "a"' in fw_output:
+        print_ascii_fail(
+            "La version de firmware quedo en 'a' (se esperaba 'b') tras el upgrade. "
+            "Se requiere atencion del operador."
+        )
+        raise RuntimeError("Validacion de fw-version fallo: string_value quedo en 'a'.")
+    else:
+        print_ascii_fail(
+            "No se pudo determinar la version de firmware (no se encontro "
+            "'string_value: \"a\"' ni 'string_value: \"b\"' en la salida de fw-version)."
+        )
+        raise RuntimeError("Respuesta inesperada verificando fw-version.")
+
+    mark_tross_step_completed("tross_vrmu_fw_version_checked")
+
+def _tross_config_attempt():
+    """Un intento completo de TROSS_CONFIG (ver esa funcion para la version
+    publica, que envuelve este intento en un retry ante sesiones de consola
+    del ZPE atascadas en solo-lectura).
+
+    Dividido en 11 etapas independientes, cada una con su propia bandera en
+    tross_config.json (tross_dhcp_applied, tross_uboot_flashed,
+    tross_linux_booted, tross_imageset_downloaded, tross_imager_done,
+    tross_bootenv_saved, tross_zpe_eth1_reconfigured, tross_lease_detected,
+    tross_vrmu_flash_done, tross_vrmu_upgrade_done,
+    tross_vrmu_fw_version_checked) -- un archivo separado de
+    provisioning_state.json, justamente para poder borrar solo este archivo
+    si hace falta rehacer todo el proceso del Tross desde cero, sin perder
+    el resto del estado del provisioning. Si el proceso se interrumpe o
+    falla a mitad de camino (por ejemplo durante los ~20 minutos del
+    imager), la proxima corrida omite las etapas ya completadas -- gracias a
+    que cada 'if is_tross_step_completed(...)' vive dentro de la etapa misma
+    -- y retoma justo en la que fallo, sin volver a flashear U-Boot ni
+    re-descargar imageset.tgz desde cero."""
+    print("--- PASO: TROSS_CONFIG - Configuracion automatica del Tross ---")
+
+    state = load_state()
+    tross_mac = state.get("config", {}).get("tross_mac")
+    if not tross_mac:
+        raise RuntimeError(
+            "No se encontro 'tross_mac' en el estado. Asegurate de correr "
+            "'tross_capture_mac' antes de 'TROSS_CONFIG'."
+        )
+
+    _tross_stage_dhcp(tross_mac)
+    _tross_stage_flash_uboot()
+    _tross_stage_boot_linux()
+    _tross_stage_download_imageset()
+    _tross_stage_run_imager()
+    _tross_stage_bootenv()
+    _tross_stage_zpe_eth1()
+    _tross_stage_lease(tross_mac)
+
+    tross_lease = load_tross_state().get("config", {}).get("tross_lease")
+    if not tross_lease:
+        raise RuntimeError(
+            "No se encontro 'tross_lease' en el estado tras la etapa de deteccion del lease."
+        )
+
+    _tross_stage_vrmu_flash(tross_lease)
+    _tross_stage_vrmu_upgrade(tross_lease)
+    _tross_stage_vrmu_fw_version_check(tross_lease)
+
     _print_green_banner("CONFIGURACION DEL TROSS (TROSS_CONFIG) COMPLETADA EXITOSAMENTE.")
-    mark_step_completed("TROSS_CONFIG", {"tross_lease": tross_lease})
+    mark_tross_step_completed("TROSS_CONFIG")
 
 def download_python_tools():
     if is_step_completed("download_python_tools"):
@@ -2923,6 +3583,9 @@ def end_config_reboot():
     state = load_state()
     flags = state.get("flags", {})
     completed_steps = [k for k, v in flags.items() if v]
+
+    tross_flags = load_tross_state().get("flags", {})
+    completed_steps += [k for k, v in tross_flags.items() if v]
 
     print(f"\n{GREEN}{'='*60}")
     print("           CONFIGURACION TERMINADA EXITOSAMENTE           ")

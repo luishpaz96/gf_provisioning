@@ -1,0 +1,1023 @@
+#################################################################################################
+COMANDOS PARA DUMMIES
+
+#reiniciar servicios
+
+#reiniciar dhcpds
+sudo systemctl restart isc-dhcp-server
+sudo systemctl restart isc-dhcp-server6
+
+#reiniciar chiller_monitor
+sudo systemctl restart chillermonitor.service
+
+#reiniciar opentest **ESTE COMANDO DETIENE PRUEBAS CORRIENDO EN OPENTEST**
+
+#Enviar/descargar archivos
+#DESCARGAR ARCHIVOS
+scp <DIRECTORIO_FENTE> <DIRECTORIO_DESTINO>
+scp 172.24.125.136:/home/testusr/U22Tocinos .
+
+#ENVIAR ARCHIVOS
+scp /home/testusr/U22Tocinos 172.24.125.136:/home/testusr/
+
+#EDITAR ARCHIVOS DHCPD
+
+sudo gedit /etc/dhcp/dhcpd.conf
+sudo gedit /etc/dhcp/dhcpd.conf6
+
+
+#################################################################################################
+
+
+Respaldar Carpetas de DHCP
+# Antes de comenzar con el proceso de actualización vamos a respaldar las carpetas de dhcp en otro rack, para esto vamos a abrir una consola en el rack que vamos a actualizar e ingresaremos los siguientes comandos:
+
+ssh 172.24.125.28
+password:google123
+cd /home/testusr/Lucio/bkp_emerg_mirror01
+mkdir bkp_ghostlite-ist-flg-XXX  (En el lugar de las XXX vamos a poner el numero del rack que vamos a actualizar)
+exit 
+cd /etc/
+scp -r dhcp 172.24.125.28://home/testusr/Lucio/bkp_emerg_mirror01/bkp_ghostlite-ist-flg-XXX
+(En las XXX vamos a poner el numero de rack que estamos configurando)
+
+
+
+Configurar la Red del equipo
+# Set Network (again)
+sudo nmcli con add con-name "SFC" ifname eno1 type ethernet ipv4.method manual ipv4.addresses 172.24.125.132/24 gw4 172.24.125.1 ipv4.dns 8.8.8.8
+
+
+# Correr Software Updater
+
+
+# Install basic software
+(Send all at once)
+sudo apt update
+sudo apt-get update
+sudo apt install openssh-server -y && sudo apt install net-tools -y && sudo apt install git -y && ssh-keygen
+
+sudo apt install -y sssd sssd-tools libpam-sss libnss-sss
+
+
+Si falla, correr
+
+sudo apt-get update
+
+#  Correr Nuevamente: Install basic software
+(Send all at once)
+sudo apt install openssh-server -y && sudo apt install net-tools -y && sudo apt install git -y && ssh-keygen
+
+You will be asked for:
+Enter file in which to save the key: [hit enter]
+Enter phrase: [hit enter]
+Enter same phrase again: [hit enter]
+
+Hint: if E: Unable to locate package "package-name", first run:
+
+
+(       imagen     )
+(     cuadro con   )
+(      simbolos    ) 
+ 
+
+sudo apt update
+
+
+Aqui ya se puede conectar por SSH a este server.
+
+
+
+
+
+# Copiar los archivos gitconfig y gitcookie  desde el git mirror server
+
+scp testusr@172.24.125.2:~/.gitconfig /home/testusr/ && scp testusr@172.24.125.2:~/.gitcookies /home/testusr/
+
+# Clonar el repo de security
+5. git clone https://mfg-partners.googlesource.com/security-hardened-image
+
+Desde el git-mirror server vamos a copier el siguiente archivo:
+
+ssh 172.24.125.2
+scp -r security-read-flg.json 172.24.125.156:/home/testusr/      colocamos la ip del rack XXX
+ 
+# Salimos del mirror
+exit
+
+Se edita el archivo y se le pone el TAG correspondiente:	Flex_Guadalajara_PROD
+
+gedit security-hardened-image/scripts/setup-patch.sh
+
+#Tambien en el archivo que acabamos de editar hay que comentar la siguiente linea
+./scripts/prepare-dvc.sh
+
+Se ejecuta el archivo:
+cd security-hardened-image
+./scripts/setup-patch.sh
+
+Si aparece el siguiente error de pubkey:
+
+Correr el comando:
+sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 32EE5355A6BC6E42
+
+Volver a ejecutar 
+./scripts/setup-patch.sh
+
+El siguiente paso ya debe estar hecho, solo hay que confirmar.
+
+10. Validate the patches. From the terminal, enter the repository with:
+
+cd security-hardened-image
+cd security_features_operation
+python3 ./security_features_operator.py -c ansible.cfg -a validate
+
+Correr los siguientes comandos
+sudo add-apt-repository universe
+
+(The key is not writable)
+cd ~/security-hardened-image/security_hardened_image/ubuntu_feature_scripts
+python3 change_dconf_settings_migrate.py 
+python3 change_dconf_settings_rollback.py
+
+(Import errors) 
+sudo pip3 install google-cloud-appengine-logging google-cloud-audit-log google-cloud-logging
+
+CONTINUAR CON EL SETUP NORMAL
+# Clone lego-infra repo (Ansible scripts)
+cd ~/ && git clone https://mfg-partners.googlesource.com/lego-infra
+
+# Ansible clean-up script
+(Send all at once)
+ 
+cd ~/lego-infra/lego_setup/ansible_installation_script && ./install-ansible-clean.sh
+
+#Si no sale tal cual indica la imagen de arriba en la pantalla y arroja errores la ejecución, corremos los siguientes comandos
+
+cd ../../
+
+git checkout 77f6ea8580832f66b520a7642e65ba13b96593ad
+
+Y volver a correr el comando:  
+cd ~/lego-infra/lego_setup/ansible_installation_script && ./install-ansible-clean.sh
+
+aqui!!!!! 17/03/26
+
+Correr
+sudo pip3 install colorlog jsonpickle google.cloud
+
+#Abrimos el siguiente archivo para editar la versiones y no tener error de NOMACHINE
+
+sudo nano /home/testusr/lego-infra/lego_setup/lego_abmx_test_server/install-nomachine.yaml
+#Dejamos el archivo modificado con las versiones iguales a la siguente linea:
+
+ deb: https://download.nomachine.com/download/9.4/Linux/nomachine_9.4.14_1_amd64.deb
+
+sudo nano /var/lib/dpkg/info/chrome-remote-desktop.postinst
+sudo dpkg --configure -a 
+sudo /usr/bin/apt-get dist-upgrade
+
+echo "Adding user $CRD_NETWORK_USER to allow the Chrome Remote Desktop network "
+    echo 'process to be run in a sandboxed environment.'
+    adduser --system --group --no-create-home --force-badname "$CRD_NETWORK_USER"
+
+    kill_processes
+
+
+
+
+# Run main ansible playbook
+(Send all at once)
+
+SI EL SERVER ES ABMX:
+cd ~/lego-infra/lego_setup/lego_abmx_test_server && ansible-playbook -i localhost, lego_abmx_test_server_setup.yml -vv --ask-become-pass --connection=local --vault-id @prompt --flush-cache
+
+
+SI EL SERVER ES SUPERLOGIC´S:
+cd ~/lego-infra/lego_setup/lego_abmx_test_server && ansible-playbook -i localhost, lego_abmx_test_server_setup.yml -vv --ask-become-pass --connection=local --vault-id @prompt --flush-cache --extra-vars "non_abmx_station=true force_modify_dhcpd_conf=true"
+
+1.	Respond accordingly when prompted:
+
+BECOME password:  55eed35fba
+Vault password (default): /!X6i8n0+cxK$v3m4tQ-
+Was lego bootstrap script, install-ansible-clean.sh' run?: yes
+Enter Test Network Interface (enter 'none' if it has already been configured manually) [none]: ens4f0
+Enter VPN Network Interface (enter 'none' if it has already been configured manually) [none]: none
+Enter SFC Network Interface (enter 'none' if it has already been configured manually) [none]: none
+Enter Tross Network Interface (enter 'none' if it has already been configured manually) [none]: none
+Are the values correct? [yes/no] [yes]: yes
+The current computer name is XXX,replace it? [yes/no]: yes ghostfish-ist-flg-054
+Enter computer name (e.g. project-bft-location-000): viperlite-ist-flg-xxx (Where xxx is the station number for this rack)
+
+
+sudo python3.10 -m pip install "setuptools<70.0.0" --break-system-packages
+
+
+#Si nomas marca error de "NoMachine" corremos los comandos siguentes: 
+
+ #borramos el siguente archivo
+rm /home/testusr/lego-infra/lego_setup/lego_abmx_test_server/install-nomachine.yaml
+
+# nos conectamos al mirror
+
+ssh 172.24.125.2
+#cargamos el siguente archivo (colocamos la ip del rack que estamos trabajando)172.24.125.xxx
+
+scp -r install-nomachine.yaml 172.24.125.124:///home/testusr/lego-infra/lego_setup/lego_abmx_test_server/
+
+# Salimos del mirror 
+exit
+
+
+
+
+vi /home/testusr/lego-infra/lego_setup/lego_abmx_test_server/install-nomachine.yaml
+ 
+
+x- para borrar 
+i- para incertar
+: wq para guardar cambios
+
+
+
+
+
+# Volvemos a correr el comando anterior, ya no deberia marcar el error
+
+SI EL SERVER ES ABMX:
+cd ~/lego-infra/lego_setup/lego_abmx_test_server && ansible-playbook -i localhost, lego_abmx_test_server_setup.yml -vv --ask-become-pass --connection=local --vault-id @prompt --flush-cache
+
+
+SI EL SERVER ES SUPERLOGIC´S:
+cd ~/lego-infra/lego_setup/lego_abmx_test_server && ansible-playbook -i localhost, lego_abmx_test_server_setup.yml -vv --ask-become-pass --connection=local --vault-id @prompt --flush-cache --extra-vars "non_abmx_station=true force_modify_dhcpd_conf=true" 
+
+
+
+metodo1 -------------------------------------------------
+
+# Regresar archivos de dhcp al rack ya configurado
+
+Para regresar los archivos de dhcp que respaldamos al inicio vamos a seguir los siguientes comandos
+ssh 172.24.125.28
+password: google123
+cd /home/testusr/Lucio/bkp_emerg_mirror01/bkp_ghostlite-ist-flg-087/dhcp  (En lugar de las XXX vamos a poner el numero de rack que configuramos)
+scp -r dhcp* 172.24.125.187://home/testusr  (En el lugar de las XXX vamos a poner la ip del rack que configuramos)
+exit
+cd /home/testusr
+sudo cp dhcp* /etc/dhcp
+password: 55eed35fba
+
+metodo 2 -------------------------------------------------
+# dentro del directorio: /testusr/home/
+
+#teclear el siguiente comando: scp 172.24.125.227:/etc/dhcp/dhcpd.conf .
+                               scp 172.24.125.228:/etc/dhcp/dhcpd6.conf .
+#donde XX es la IP del rack de donde se va a extraer el archivo  
+                              
+#mover el archivo a la carpeta correspondiente con el siguiente comando: sudo mv dhcpd.conf /etc/dhcp/ 
+                                                                         sudo mv dhcpd6.conf /etc/dhcp/
+
+
+Y validamos que estén los archivos en la carpeta de /etc/dhcp1
+sudo gedit /etc/dhcp/dhcpd.conf			
+sudo gedit /etc/dhcp/dhcpd6.conf	
+
+
+
+
+
+# Run final ABMX server configuration via git-mirror
+1.	Use SSH to connect to the primary  git-mirror server   
+
+ssh testusr@172.24.125.2
+
+
+2.	Copy ssh key to IST test server:
+
+ssh-copy-id -i ~/.ssh/id_rsa.pub testusr@172.24.125.167
+
+
+Where xxx is the test station's IP address
+
+#En el siguiente comando hay que colocar la IP(172.24.125.xxx) del rack con el que estamos trabajando. 
+
+
+3.	Run the script from the git mirror:
+
+cd ~/amp-ansible && ansible-playbook -i 172.24.125.166, repo_updater/configure-fish-station.yaml -vv --ask-become-pass --ask-pass --flush-cache --vault-id @prompt
+
+PARA GHOSTFISH, SI ES ESTACION NUEVA (recién instalado U22)
+cd ~/amp-ansible && ansible-playbook -i 172.24.125.167, repo_updater/configure-fish-station.yaml -vv --ask-become-pass --ask-pass --flush-cache --vault-id @prompt --extra-vars "force_modify_dhcpd6_conf=true"
+
+Where xxx is the test station's IP address
+
+
+4.	Respond accordingly when prompted: 
+
+BECOME password:  55eed35fba
+BECOME password[defaults to SSH password]: 55eed35fba
+Vault password (default): /!X6i8n0+cxK$v3m4tQ-
+
+
+# Si sale la siguente leyenda, colocar el password de (55eed35fba)
+
+
+ >>> Please enter the password for 'testusr' (operator). This is used to automate functions while script runs! 
+ >>> Note that this password may not be the one you used above! 
+ -------------------------------------------------------------------------
+ >>> Is git-mirror running the script? if so, all targets should be using
+
+ 		 *** THE SAME OPERATOR PASSWORD!! *** 
+
+
+
+# 1. Clear out any broken files from previous attempts
+rm -f goss*
+
+# 2. Run the official automated script to install the latest version cleanly
+curl -fsSL https://goss.rocks/install | sudo sh
+
+
+
+
+
+
+5.	Observe the terminal output to ensure the script finished with no errors:
+
+si falla de amp-ansible, nos salimos del mirror y en el rack 
+
+correr 
+
+git clone https://mfg-partners.googlesource.com/amp-ansible  
+
+posteriormente nos volvemos a dentrar al mirror y corremos el comando del paso 3
+
+1.	Exit git-mirror  server:
+exit
+
+# Crear symlink para evitar los cambios locales en scripts
+
+***link NetworkManager to network-manager 
+
+cd /usr/lib/systemd/system
+
+ls -l *etwork*
+
+sudo apt update && sudo apt install libsss-sudo
+
+sudo ln -s NetworkManager.service network-manager.service
+
+sudo systemctl daemon-reload
+
+sudo systemctl status network-manager.service
+
+
+
+
+1.	Reboot test station server:        aqui----- 13/04/2026
+ssh testusr@172.24.125.165
+sudo reboot
+      
+#instalar aplicacion de ajustes    
+sudo apt install gnome-control-center
+
+
+Si se cambio el nombre de la interfaz ns4f0 seguir los siguientes pasos 
+
+sudo gedit /etc/netplan/01-network-manager-all.yaml
+
+Copiar ersto en el archivo, cambiando las mac address del puerto el cual se saca con el comando ifconfig
+
+# Let NetworkManager manage all devices on this system
+network:
+  version: 2
+  ethernets:
+      ens4f0np0:
+               dhcp4: no
+               match:
+                   macaddress: e8:ea:6a:2a:c2:6e
+               set-name: ens4f0
+      ens4f1np1:
+               dhcp4: no
+               match:
+                   macaddress: e8:ea:6a:2a:c2:6f 
+               set-name: ens4f1
+  renderer: NetworkManager
+
+se guardan los cambios
+
+sudo netplan try
+
+sudo netplan apply
+
+y se verifica que haya funcionado el cambio 
+
+#Juniper
+
+sudo minicom -D /dev/ttyUSB0 -b 9600
+		****Puede diferir entres USB0 y USB1
+		****Password: 55eed35fba 
+
+#Dentro del Juniper iniciaremos sesion
+root
+password: google123
+
+Si no pide contrasena y entra directo al “root” quiere decir que el Juniper no esta configurado
+
+#Para configurarlo ejecutaremos los siguientes pasos, desde root
+cli
+configure
+set system root-authentication plain-text-password
+google123
+google123
+commit
+delete chassis auto-image-upgrade
+commit
+wildcard range delete interfaces et-0/0/[0-31] unit 0 family inet
+wildcard range delete interfaces et-0/0/[0-31]:[0-3] unit 0 family inet
+wildcard range delete interfaces xe-0/0/[0-31]:[0-3] unit 0 family inet
+wildcard range delete interfaces et-0/0/[0-31] unit 0
+wildcard range delete interfaces et-0/0/[0-31]:[0-3] unit 0
+wildcard range delete interfaces xe-0/0/[0-31]:[0-3] unit 0
+wildcard range set interfaces et-0/0/[0-31] unit 0 family ethernet-switching
+wildcard range set interfaces xe-0/0/[0-31]:[0-3] unit 0 family ethernet-switching
+commit
+exit
+show system alarms
+request system configuration rescue save
+show system alarms
+exit
+shutdown -r now
+
+Salir juniper ctrl + a + x
+
+#Para hacerlo de manera automatica
+cd ~/lego-infra/lego_setup/lego_juniper_switch/auto_config_juniper_switch/ && sudo su && python3 auto_config_juniper_switch.py
+
+Respond accordingly when prompted:
+
+Enter product name (vl or vf): vl
+Enter juniper model (qfx5100 or qfx5200): 5200
+
+#Reset de fabrica a Juniper
+#Need to reset Juniper QFX5200 to factory default?
+
+1. Connect console cable and open console session:
+
+root Enter password
+cli
+request system zeroize
+
+-------------------------------------------------------------------------------------------------
+###Downgrade Juniper
+#Conecte cable consola a Juniper
+
+sudo apt install putty
+sudo putty -serial /dev/ttyUSB0 -sercfg 9600,8,n,1,N
+#si da error la USB0 cambiar por USB1
+
+#Coloque memoria usb con la imagen del juniper
+
+shutdown -r now
+
+#Mantenga latecla ESC presionada
+#dentro del bios de la juniper seleccione BOOT MANAGER
+#Seleccione la usb con laimagen
+#Instale la imagen
+
+
+-------------------------------------------------------------------------------------------------
+
+
+# Obtain ZPE console switch MAC address  
+1. Connect to ZPE  with console port (front panel), user/password:  admin, admin
+
+
+sudo minicom -D /dev/ttyUSB0 -b 115200
+
+user:
+admin
+password:
+admin
+
+cd /settings/network_connections
+show
+
+55eed35fba
+Record ETH1 ( MAC address)
+e4:1a:2c:04:20:0e
+Tross
+98:98:FB:7D:C2:C0
+
+
+salimos del ZPE ctrl + a + x
+
+Configurar ZPE
+
+#Configurar mac del zpe en dhcpd.conf primero
+sudo gedit /etc/dhcp/dhcpd.conf
+sudo systemctl restart isc-dhcp-server
+sudo systemctl restart isc-dhcp-server6
+
+ping 10.0.0.254
+ping 10.0.0.253
+
+
+cd ~/lego-infra/lego_setup/lego_zpe_console_server && ssh -t -t -v -o ConnectTimeout=10 admin@10.0.0.253 < lego_config_zpe_allports.sh
+
+password:admin
+
+
+Y ya por ultimo hacemos la validación de comunicación entre el rack y las Astorias
+sudo systemctl restart isc-dhcp-server
+sudo systemctl restart isc-dhcp-server6
+ping 10.0.0.253 (This is the zpe console switch)
+ping 10.0.0.250 (This is the Relaytor)
+
+##############################################################################################################################
+
+#Tross config
+#jalar los siguientes archivos de un rack ya configurado
+
+#paso 1
+scp -r 172.24.125.172:/home/testusr/viperfish-dvc .
+scp -r 172.24.125.172:/home/testusr/vrmu_util  .
+scp -r 172.24.125.172:/home/testusr/ledare_1_* .
+scp -r 172.24.125.172:/home/testusr/FWContainer_EN_3_AP_00_02_00_09.bin .
+
+
+#Copy tross image from viperfish-dvc/vin-sweep to /tftpboot/
+cd viperfish-dvc/vin-sweep/
+cp -r tross /tftpboot/
+
+#Copy vrmu_util from viperfish-dvc/vin-sweep/ledare_fw to ~
+
+cp vrmu_util ~
+chmod 777 vrmu_util
+
+#conectar cable consola de tross a ZPE puerto 17
+telnet 10.0.0.253 7017
+
+#Interrumpir boot manteniendo precionada la tecla espacio hasta que salga la flecha => 
+=> 
+=> 
+=> 
+
+setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254
+setenv serverip 10.0.0.254
+tftpboot 0x60000000 tross/uboot_planet-hurricane3.bin
+
+
+-------------------------------------------------------------------------------
+debes recibir la siguiente respuesta:
+
+Change GMAC speed to 1000MB
+Using gmac-0@mdk device
+TFTP from server 10.0.0.254; our IP address is 10.0.0.251
+Filename 'tross/uboot_planet-hurricane3.bin'.
+Load address: 0x60000000
+Loading: #################################################################
+	 ##
+	 6.9 MiB/s
+done
+Bytes transferred = 981012 (ef814 hex)
+
+--------------------------------------------------------------------------------
+
+#si no recibes esa respuesta regresar al paso 1
+
+sf probe
+#SF: Detected MX25L12805 with page size 256 Bytes, erase size 64 KiB, total 16 MiB
+sf erase 0x0 0x100000
+#SF: 1048576 bytes @ 0x0 Erased: OK
+sf write 0x60000000 0x0 0x100000
+#device 0 offset 0x0, size 0x100000
+#SF: 1048576 bytes @ 0x0 Written: OK
+sf erase 0x1c0000 0x10000
+#SF: 65536
+reset
+    
+#Interrumpir boot manteniendo precionada la tecla espacio hasta que salga la flecha => 
+=> 
+=> 
+=> 
+
+=>
+setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254
+setenv serverip 10.0.0.254
+setenv goog_boot netboot;setenv verify-sig 0;run set_ramboot
+tftpboot 0x70000000 tross/combined.uImage;run boot_kernel
+
+#debes recibir la siguiente respuesta: 
+-------------------------------------------------------------------------------
+Change GMAC speed to 1000MB
+Using gmac-0@mdk device
+TFTP from server 10.0.0.254; our IP address is 10.0.0.251
+Filename 'tross/combined.uImage'.
+Load address: 0x70000000
+Loading: #################################################################
+​
+#################################################################
+​
+#################################################################
+​
+#################################################################
+……
+--------------------------------------------------------------------------------
+      
+#(espera la pantalla de login)
+……
+(none) login: root
+Password: google
+
+#root@:~ 
+killall rcS
+uname -a
+#Linux 4.19.238-planet-hurricane3 #1 SMP Thu Apr 28 12:18:37 PDT 2022 armv7l
+cd /tmp
+tftp -g -r tross/imageset.tgz 10.0.0.254
+#(si te falla este step, valida la mac del tross en el dhcpd.conf)
+#(espera 1~2 minutos)
+
+ls
+#StatsWB.Flow.lock StatsWB.Port.lock core imageset.tgz sandcastle
+
+md5sum imageset.tgz
+#3e52decb2b76aa84f83c5ae97e520c77 imageset.tgz
+
+tar Oxzf imageset.tgz tools-cf.tgz | tar xz && netconfig=no ./imager ab
+
+#(espera ~8 minutos a que termine el proceso y debe de dar la siguiente respuesta:)
+-----------------------------------------------------------------------------------
+computing md5 of installed root file system
+md5 of '/tmp/imageset.tgz' = 142c29970d23c3e4819f144812a64b79
+sudo mount -a -t vfat
+Setting regionselect to a/0
+sync
+INFO: : imager done at Thu Apr 28 18:09:47 PDT 2022
+
+-------------------------------------------------------------------------------------
+
+reboot
+
+#Interrumpir boot manteniendo precionada la tecla espacio hasta que salga la flecha => 
+=> 
+=> 
+=> 
+
+setenv bootcase_1 "bootcount 2;run pri_cf_bootcmd"
+setenv bootdelay 3
+saveenv
+
+debe de dar la siguiente respuesta:
+-----------------------------------------------------------------------------------
+
+Saving Environment to SPI Flash...
+SF: Detected MX25L12805 with page size 256 Bytes, erase size 64 KiB, total 16 MiB
+Erasing SPI flash...Writing to SPI flash...done
+
+-----------------------------------------------------------------------------------
+reset
+(Good to go!!!)
+
+login: root
+Password:google
+
+
+Despues de realizar esos pasos es necesario realizar lo que sigue del archivo tross_conf.docx
+a partir del apartado: "Ya de nuevo en la terminal de nuestro rack en configuración:
+Del documento PDF seguir los siguientes paso"
+
+
+#Se inicia con el comando:
+ssh admin@10.0.0.253
+
+Password: admin
+
+[admin@nodegrid /]# cd /settings/network_connections/ETH1
+[admin@nodegrid ETH1]# set ipv4_mode=static
+[+admin@nodegrid ETH1]#
+[+admin@nodegrid ETH1]# set ipv4_address=10.0.0.253
+[+admin@nodegrid ETH1]# set ipv4_bitmask=8
+[+admin@nodegrid ETH1]# set ipv4_gateway=10.0.0.254
+[+admin@nodegrid ETH1]# show
+
+
+
+#Despues se tiene que describir lo siguiente:
+name: ETH1
+type: ethernet
+ethernet_interface = eth1
+connect_automatically = yes
+set_as_primary_connection = no
+enable_lldp = no
+ipv4_mode = static
+ipv4_address = 10.0.0.253
+ipv4_bitmask = 8
+ipv4_gateway = 10.0.0.254
+ipv4_dns_server =
+ipv4_dns_search =
+ipv6_mode = address_auto_configuration
+ipv6_dns_server =
+ipv6_dns_search =
+
+#Para asi terminar con el comando:
+
+[+admin@nodegrid ETH1]# commit
+[admin@nodegrid ETH1]#
+
+
+#Despues es necesario escribir el comando en otra terminal
+cat /mnt/region_config/dhcpd/dhcpd.rymden.leases 
+
+#A continuacion saldra el siguiente texto:
+
+# The format of this file is documented in the dhcpd.leases(5) manual page.
+# This lease file was written by isc-dhcp-4.4.1
+
+# authoring-byte-order entry is generated, DO NOT DELETE
+authoring-byte-order little-endian;
+
+server-duid "\000\001\000\001)\375\363\333\300\034je\264\200";
+
+lease 10.254.128.2 {
+  starts 5 2022/04/29 00:56:06;
+  ends 5 2022/04/29 01:06:06;
+  cltt 5 2022/04/29 00:56:06;
+  binding state active;
+  next binding state free;
+  rewind binding state free;
+  hardware ethernet 00:00:ba:b0:ac:28;
+  uid "\001\000\000\272\260\254(";
+  client-hostname "ghostfish-ist-flg-008";
+}
+lease 10.254.128.3 {
+  starts 5 2022/04/29 00:56:59;
+  ends 5 2022/04/29 01:06:59;
+  cltt 5 2022/04/29 00:56:59;
+  binding state active;
+  next binding state free;
+  rewind binding state free;
+  👉️hardware ethernet c0:1c:6a:65:b4:82;
+}
+lease 10.254.128.2 {
+  starts 5 2022/04/29 01:01:05;
+  ends 5 2022/04/29 01:11:05;
+  cltt 5 2022/04/29 01:01:05;
+  binding state active;
+  next binding state free;
+  rewind binding state free;
+  hardware ethernet 00:00:ba:b0:ac:28;
+  uid "\001\000\000\272\260\254(";
+  client-hostname "ghostfish-ist-flg-008";
+}
+lease 10.254.128.3 {
+  starts 5 2022/04/29 01:01:34;
+  ends 5 2022/04/29 01:11:34;
+  cltt 5 2022/04/29 01:01:34;
+  binding state active;
+  next binding state free;
+  rewind binding state free;
+  hardware ethernet c0:1c:6a:65:b4:82;
+}
+
+
+#Debes seleccionar alguno de ellos, primordialmente puede ser el 3, sin embargo si no sale seleccionas el 2
+#De acuerdo a lo arrojado en el Tross, la IP que le corresponde es 10.254.128.X
+
+ping -c 3 10.254.128.X
+
+#Al dar ese ping debe salir el siguiente enunciado:
+                                             
+64 bytes from 10.254.128.3: icmp_seq=1 ttl=255 time=0.388 ms
+64 bytes from 10.254.128.3: icmp_seq=2 ttl=255 time=0.289 ms
+64 bytes from 10.254.128.3: icmp_seq=3 ttl=255 time=0.291 ms
+
+--- 10.254.128.3 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2038ms
+rtt min/avg/max/mdev = 0.289/0.322/0.388/0.046 ms
+testusr@ghostfish-ist-flg-008:~$
+
+#Despues le damos al siguiente codigo (Reemplazar la X por el numero del ping):
+./vrmu_util --api=/rmu_util --api=/macros/flash --hostname=10.254.128.X --srec_prefix=ledare_1_8_5 --logtostderr --envelope_enabled=fals
+
+#Debes esperar 10 minutos, no seas perro desesperado, despues vuelves a poner el mismo comando:
+./vrmu_util --api=/rmu_util --api=/macros/flash --hostname=10.254.128.X --srec_prefix=ledare_1_8_5 --logtostderr --envelope_enabled=fals
+
+#Despues de eso, correr:
+./vrmu_util --envelope_enabled=false --hostname=10.254.128.X --logtostderr --api=/api/peripheral/upgrade --peripheral_firmware_filename=FWContainer_EN_3_AP_00_02_00_09.bin
+
+#Se mirara el siguiente texto: INTERNAL: Upgrade failed: 2
+#Si da eso, correr el siguiente comando, debes de verificar que el String_value sea "b":
+
+ ./vrmu_util --hostname=10.254.128.X --envelope_enabled=false | grep -a4 fw-version
+ 
+#Dara lo siguiente:
+
+  units: ""
+  string_value: "b"
+}
+streamz {
+  streamz_name: "/flash/fw-version"
+  device_name: "FE_PORT23_Ledare_C0:1C:6A:65:AF:1E"
+  units: ""
+  string_value: "Ledare 1.8.5"
+}
+--
+  units: ""
+  string_value: "Jolt100"
+}
+streamz {
+  streamz_name: "/rectifier-shelf/fw-version"
+  device_name: "FE_PORT23_Rectifier Shelf 0_C0:1C:6A:65:AF:1E"
+  units: ""
+  int_value: 17039360
+}
+--
+  units: ""
+  string_value: "Jolt100"
+}
+streamz {
+  streamz_name: "/rectifier-shelf/fw-version"
+  device_name: "FE_PORT23_Rectifier Shelf 1_C0:1C:6A:65:AF:1E"
+  units: ""
+  int_value: 17039360
+}
+
+
+
+#Despues se verifica el estado actual
+
+~/vrmu_util --hostname=10.254.128.X --envelope_enabled=false | grep -a4 dc-voltage
+
+#Debe de mostrar los 54V de todos los rectificadores
+#Luego se envía el comando para setear el valor del voltaje a 45 V durante 15 seg, se puede observar que el LED de los Jolt100 va cambiar de >50V a <50V
+
+~/vrmu_util --hostname=10.254.128.X --envelope_enabled=false --api="/api/rectifier/outputsequence" --rectifier_output_sequence="45:100:15" 2>&1
+
+#Se verifica nuevamente el estado de los rectificadores para confirmar la variación de voltaje:
+
+~/vrmu_util --hostname=10.254.128.X --envelope_enabled=false | grep -a4 dc-voltage
+
+#Si todo funciona correctamente, aqui termina la configuracion :)
+
+
+
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⡴⠶⠚⠛⠛⡿⠿⣿⠛⢶⠛⠓⠶⢦⣄⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⠶⠛⠉⠀⣀⣀⣴⡶⠾⢤⣚⠉⢣⡈⠳⡀⠀⠀⠹⡆
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣤⠶⠛⠉⠀⠀⠀⡏⠉⢁⡤⢟⠀⡖⢦⡈⠓⠤⠵⠀⡇⠀⠀⠀⣿
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣤⡴⠶⠛⠋⠉⠀⠀⣀⠤⠴⡽⠋⠁⠚⣅⠀⠸⡀⢳⠀⠉⠒⠤⠔⡞⠉⠒⠉⢱⣏
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣤⡴⠶⠚⠋⢉⣀⠀⠀⣀⣠⣎⣁⠚⣁⡤⠖⡁⢸⠉⢦⡈⠳⠤⠃⡸⠀⢀⡴⠒⠴⡥⠒⠒⢦⢀⡿
+⠀⠀⠀⠀⠀⠀⢀⣠⣤⠶⠛⠋⠉⠀⠀⣀⣀⣰⠋⠀⠉⠉⢠⠏⢁⣀⠙⢧⡀⠀⡇⠈⡇⠀⠙⠒⠤⢲⠗⠒⠚⢀⠖⠋⠀⠀⠀⢸⡟⠀
+⠀⠀⠀⠀⣴⠞⠋⠁⠀⡰⠓⢦⠤⠒⠚⠀⡸⠋⡉⠓⣖⠉⠹⡀⢸⠀⠱⢄⡈⠉⣡⠜⠓⠤⡤⠒⣒⣋⣀⠞⠁⠀⠀⠀⠀⠀⠀⣾⠃⠀
+⠀⠀⢀⣼⣧⣀⡞⣉⣉⣡⠞⢉⡉⠳⡊⠉⡇⢸⠉⢦⠈⢦⣀⡇⢸⠄⠀⠀⠉⣹⠃⢀⡠⠤⠤⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡾⠃⠀⠀
+⠀⢀⣼⠷⢧⡀⠹⡄⠀⢸⠀⡎⠹⡄⠱⡄⡇⢸⣇⡀⠓⢤⣀⣠⣞⠀⡰⢋⣀⣁⡠⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⠟⠀⠀⠀⠀
+⢰⠟⠁⠀⠀⠙⡄⠘⣄⡸⠀⡇⠀⠙⢤⣈⣠⡾⠉⠈⠉⠒⠊⢀⣀⣉⠜⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⡶⠋⠁⠀⠀⠀⠀⠀
+⣿⠀⣆⡀⠀⠀⠘⠦⣀⣀⣴⠥⠤⠄⠠⠔⠚⠁⡰⠚⠒⠤⠜⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⠶⠛⠁⠀⠀⠀⠀⠀⠀⠀⠀
+⢿⡀⡜⠃⠀⢠⠖⠲⠤⠞⡡⠤⣀⣀⡴⠊⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⡴⠞⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠈⢳⣌⡀⠀⠈⢆⣠⠒⠊⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⡴⠞⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠈⠙⠛⢲⣏⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣠⣤⠴⠞⠛⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠈⠙⣷⣤⣀⣀⣀⣀⣀⣀⣀⣠⣤⠴⠶⠚⠋⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀TOCINOS.SA.DE.CV⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+
+
+
+
+
+
+
+Bootea izumis
+
+----------------------------------------------------------------------------------------
+
+#configurar chiller monitor para telemetry CTH
+
+
+
+sudo nano /etc/systemd/system/chillermonitor.service
+
+#Comentar la linea ExecStart=.... 
+#Agregar la siguiente linea
+ExecStart=/usr/bin/python3 -m stew.services.chiller_monitor.chiller_monitor -c /home/testusr/opentest-google-stew/stew/services/chiller_monitor/config/flex_sensor_config.ini
+
+scp 172.24.125.166:/home/testusr/opentest-google-stew/stew/services/chiller_monitor/module/data_logging.py .
+scp 172.24.125.166:/home/testusr/opentest-google-stew/stew/services/chiller_monitor/config/flex_sensor_config.ini .
+
+sudo mv data_logging.py /home/testusr/opentest-google-stew/stew/services/chiller_monitor/module/
+sudo mv flex_sensor_config.ini /home/testusr/opentest-google-stew/stew/services/chiller_monitor/config/
+
+systemctl daemon-reload
+sudo systemctl restart chillermonitor.service
+
+google-chrome 127.0.0.1:8090/open_test && google-chrome 127.0.0.1:5000 && google-chrome 10.0.0.100
+
+
+
+
+ 
+
+
+----------------------------------------------------------------------------------------
+ # Revisar que el repo DVC este en la versión correcta. 
+
+Vamos a ingresar el siguiente comando en una consola del rack que acabamos de actualizar 
+
+
+scp testusr@172.24.125.171:~/check_vers_ru.py /home/testusr/ 
+
+password: google123 
+
+./check_vers_ru.py 
+
+ 
+Si la salida de este comando se ve así:   
+
+--- repo no actualizado!!  --- 
+
+
+
+Esto quiere decir que el repo no esta en la versión correcta 
+
+Vamos a ingresar los siguientes comandos: 
+
+cd ghostlite-dvc 
+
+git checkout tags/gl-ramp-7.0 
+
+
+Con esto vamos a poner el repo en su versión correcta 
+
+Ya por último confirmamos que ahora si aparezca en verde el repo con los siguientes comandos 
+
+ 
+Cd 
+
+./check_vers_ru.py 
+
+ Y se debe de ver de la siguiente manera: 
+ 
+ --- repo si esta actualizado!!!  ----
+      
+      
+      
+Ya por último revisamos que estos  servicios estén corriendo de forma correcta, ya que son los principales  
+
+ 
+
+sudo systemctl status falcon-sensor 
+
+sudo systemctl status isc-dhcp-server.service 
+
+sudo systemctl status isc-dhcp-server6.service 
+
+sudo systemctl status opentest 
+
+sudo systemctl status NetworkManager.service 
+
+
+
+
+Si falla el servicio de FALCON SENSOR hay que seguir los siguientes pasos 
+1 vamos a reiniciar el rack
+Una vez vuelva a prender camos a ingresar los siguientes comandos 
+2 cd security-hardened-image/security_features_operation
+3 python3 ./security_features_operator.py -c ansible.cfg -a apply
+Esperamos a que termine de correr y se tiene que ver algo así 
+ 
+4 cd ..
+5 ./scripts/setup-patch.sh
+Dejamos que corra y se tiene que ver algo así 
+ 
+
+Una vez terminado vamos a reiniciar el servicio de falcon sensor 
+sudo systemctl restart falcon-sensor
+y por ultimo revisamos que el servicio ya corra de forma correcta 
+sudo systemctl status falcon-sensor
+
+
+
+
+
+
+scp 172.24.125.151:/home/testusr/connection_validation.py .
+
+ 
+
+NOTA: Si falalan los servicios de isc-dhcp-server.service y isc-dhcp-server6.service esto quiere decir que tenemos un problema con los archivos de DHCP, hay que revisarlos y hacer la validación de comunicación con el ZPE y Astorias. 
+
+ 
+
+ 
+
+Y por último reiniciamos el servicio de opentest y ya podemos realizar la prueba de validación con la unidad GOLDEN       
+      
+      
+      
+    
+
+
+
+scp testusr@172.24.125.171:~/check_vers_ru.py /home/testusr/ 
+
+./check_vers_ru.py
+
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
