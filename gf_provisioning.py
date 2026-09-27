@@ -9,6 +9,7 @@ import time
 import select
 import atexit
 import uuid
+import getpass
 
 # ==============================================================================
 # CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
@@ -67,38 +68,161 @@ atexit.register(log_final_summary)
 # VARIABLES GLOBALES
 # ==============================================================================
 STATE_FILE = "provisioning_state.json"
-
-# --- Recursos propietarios (links, comandos, contrasenas) ---
-# NADA de esto vive hardcodeado en el codigo (para poder tener este script
-# en un repo publico). Todo se descarga en runtime desde resources_gf.json
-# (ver fetch_resources_gf()/ensure_resources(), llamada SIEMPRE como lo
-# primero en __main__) y estas variables se llenan ahi via _apply_resources().
+# SUDO_PASSWORD y MIRROR_PASSWORD ya NO viven aqui como texto plano.
+# Se piden interactivamente (una sola vez) en ensure_credentials() y se
+# guardan en STATE_FILE; estas variables globales se llenan en tiempo de
+# ejecucion antes de que cualquier otra funcion las use. VAULT_PASSWORD
+# se queda hardcodeada aqui por decision explicita.
 SUDO_PASSWORD = None
-VAULT_PASSWORD = None
 MIRROR_PASSWORD = None
-JUNIPER_ROOT_PASSWORD = None
-RACK_NETWORK_BASE = None          # ej. "172.24.125" -> IPs de rack "RACK_NETWORK_BASE.N"
-MIRROR_IP = None                  # IP del Git-Mirror
-VRMU_REMOTE_HOST = None           # host remoto para vrmu_util_config()
-PYTHON_TOOLS_REMOTE_HOST = None   # host remoto para download_python_tools()
-LEGO_INFRA_GIT_URL = None
-SECURITY_HARDENED_IMAGE_GIT_URL = None
-DEFAULT_NOMACHINE_URL = None
-GPG_KEY_IMPORT_CMD = None
-CHROME_REPO_LINE = None
-ANSIBLE_PLAYBOOK_FILE = None
-MIRROR_ANSIBLE_DIR = None
-MIRROR_ANSIBLE_PLAYBOOK = None
-PYTHON_TOOLS_FILES = []
-VRMU_ITEMS_TO_DOWNLOAD = []
-LEGO_INFRA_SUBDIR = None
-LEGO_ABMX_TEST_SERVER_SUBDIR = None
-LEGO_ZPE_CONSOLE_SERVER_SUBDIR = None
-NOMACHINE_INSTALL_YAML = None
-SECURITY_HARDENED_IMAGE_SUBDIR = None
-SECURITY_READ_FLG_FILE = None
-DHCPD_CONF_CONTENT = None
-DHCPD6_CONF_CONTENT = None
+VAULT_PASSWORD = r"/!X6i8n0+cxK$v3m4tQ-"
+DEFAULT_NOMACHINE_URL = "https://download.nomachine.com/download/9.8/Linux/nomachine_9.8.2_1_amd64.deb"
+GPG_KEY_IMPORT_CMD = (
+    "wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | "
+    "sudo gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/google-chrome.gpg"
+)
+
+DHCPD_CONF_CONTENT = """# BEGIN ANSIBLE MANAGED BLOCK
+ddns-update-style none;
+ignore client-updates;
+allow booting;
+allow bootp;
+ddns-updates off;
+default-lease-time 6000;
+max-lease-time 7200;
+authoritative;
+subnet 10.0.0.0 netmask 255.255.0.0 {
+  option subnet-mask 255.255.0.0;
+  option routers 10.0.0.254;
+  option broadcast-address 10.0.255.255;
+  next-server 10.0.0.254;
+
+  filename "http://10.0.0.254:8001/pxelinux.0";
+}
+host izumi-1 { hardware ethernet 98:98:FB:CA:F0:E5; fixed-address 10.0.0.1; }
+host izumi-2 { hardware ethernet 98:98:FB:CA:F1:85; fixed-address 10.0.0.2; }
+host izumi-3 { hardware ethernet 98:98:FB:CB:06:DD; fixed-address 10.0.0.3; }
+host izumi-4 { hardware ethernet 98:98:FB:CB:01:ED; fixed-address 10.0.0.4; }
+host izumi-5 { hardware ethernet 98:98:FB:CA:D6:D5; fixed-address 10.0.0.5; }
+host izumi-6 { hardware ethernet 98:98:FB:D0:DA:05; fixed-address 10.0.0.6; }
+host izumi-7 { hardware ethernet 98:98:FB:CB:06:E5; fixed-address 10.0.0.7; }
+host izumi-8 { hardware ethernet 98:98:FB:C5:98:8D; fixed-address 10.0.0.8; }
+host izumi-9 { hardware ethernet 98:98:FB:CF:26:55; fixed-address 10.0.0.9; }
+host izumi-10 { hardware ethernet 98:98:FB:CB:0D:85; fixed-address 10.0.0.10; }
+host izumi-11 { hardware ethernet 98:98:FB:CF:25:3D; fixed-address 10.0.0.11; }
+host izumi-12 { hardware ethernet 98:98:FB:CA:E6:05; fixed-address 10.0.0.12; }
+host izumi-13 { hardware ethernet 98:98:FB:CB:6E:95; fixed-address 10.0.0.13; }
+host izumi-14 { hardware ethernet 98:98:FB:D0:E7:25; fixed-address 10.0.0.14; }
+host izumi-15 { hardware ethernet 98:98:FB:CA:E5:F5; fixed-address 10.0.0.15; }
+host izumi-16 { hardware ethernet 98:98:FB:C5:33:3D; fixed-address 10.0.0.16; }
+host rj45-switch { hardware ethernet 00:00:00:00:00:00; fixed-address 10.0.0.249; }
+
+# END ANSIBLE MANAGED BLOCK
+host zpe { hardware ethernet e4:1a:2c:02:c3:0c; fixed-address 10.0.0.253; }
+host iboot { hardware ethernet 00:0D:AD:04:92:28; fixed-address 10.0.0.250; }
+host tross { hardware ethernet C0:1C:6A:66:C2:E4; fixed-address 10.0.0.251; }
+  filename "http://10.0.0.254:8001/pxelinux.0";"""
+
+DHCPD6_CONF_CONTENT = """# BEGIN ANSIBLE MANAGED BLOCK
+ddns-update-style none;
+ignore client-updates;
+allow booting;
+allow bootp;
+ddns-updates off;
+default-lease-time 6000;
+max-lease-time 7200;
+authoritative;
+option domain-search-list code 119 = text;
+option dhcp6.bootfile-url code 59 = string;
+option dhcp6.name-servers fd00::9;
+
+subnet6 fd00::/64 {
+range6 fd00::11 fd00::FF;
+option dhcp6.bootfile-url "http://[fd00::9]:8001/diorite/ipxe.cfg";
+log(info, "DHCPv6 - Found other ipv6 client...");
+
+host diorite-1 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:F0:E2;
+log(info, "DHCPv6 - Found Diorite-1 client...");
+fixed-address6 fd00::10;
+}
+host diorite-2 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:F1:82;
+log(info, "DHCPv6 - Found Diorite-2 client...");
+fixed-address6 fd00::11;
+}
+host diorite-3 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:06:DA;
+log(info, "DHCPv6 - Found Diorite-3 client...");
+fixed-address6 fd00::12;
+}
+host diorite-4 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:01:EA;
+log(info, "DHCPv6 - Found Diorite-4 client...");
+fixed-address6 fd00::13;
+}
+host diorite-5 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:D6:D2;
+log(info, "DHCPv6 - Found Diorite-5 client...");
+fixed-address6 fd00::14;
+}
+host diorite-6 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:D0:DA:02;
+log(info, "DHCPv6 - Found Diorite-6 client...");
+fixed-address6 fd00::15;
+}
+host diorite-7 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:06:E2;
+log(info, "DHCPv6 - Found Diorite-7 client...");
+fixed-address6 fd00::16;
+}
+host diorite-8 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:C5:98:8A;
+log(info, "DHCPv6 - Found Diorite-8 client...");
+fixed-address6 fd00::17;
+}
+host diorite-9 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CF:26:52;
+log(info, "DHCPv6 - Found Diorite-9 client...");
+fixed-address6 fd00::18;
+}
+host diorite-10 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:0D:82;
+log(info, "DHCPv6 - Found Diorite-10 client...");
+fixed-address6 fd00::19;
+}
+host diorite-11 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CF:25:3A;
+log(info, "DHCPv6 - Found Diorite-11 client...");
+fixed-address6 fd00::1A;
+}
+host diorite-12 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:E6:02;
+log(info, "DHCPv6 - Found Diorite-12 client...");
+fixed-address6 fd00::1B;
+}
+host diorite-13 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:6E:92;
+log(info, "DHCPv6 - Found Diorite-13 client...");
+fixed-address6 fd00::1C;
+}
+host diorite-14 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:D0:E7:22;
+log(info, "DHCPv6 - Found Diorite-14 client...");
+fixed-address6 fd00::1D;
+}
+host diorite-15 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:E5:F2;
+log(info, "DHCPv6 - Found Diorite-15 client...");
+fixed-address6 fd00::1E;
+}
+host diorite-16 {
+host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:C5:33:3A;
+log(info, "DHCPv6 - Found Diorite-16 client...");
+fixed-address6 fd00::1F;
+}
+}
+# END ANSIBLE MANAGED BLOCK"""
 
 def print_ascii_fail(message="Se detecto un error durante la ejecucion."):
     """Banner compacto de FALLO (rojo). 'message' describe que fallo
@@ -167,151 +291,65 @@ def mark_step_completed(step_name, extra_config=None):
     save_state(state)
     print(f"[✓] Paso '{step_name}' completado y registrado en {STATE_FILE}.")
 
-RESOURCES_FILE = "resources_gf.json"
-RESOURCES_START_IP = "172.24.125.136"
-RESOURCES_HTTP_PORT = 8000
-RESOURCES_HTTP_PATH = "/resources_gf.json"
+def _prompt_password_twice(label):
+    """Pide una contraseña dos veces (input oculto via getpass) hasta que
+    ambas coincidan y no esten vacias. Se usa para no dejar contrasenas
+    hardcodeadas en el codigo fuente."""
+    while True:
+        p1 = getpass.getpass(f"Ingresa la contraseña de {label}: ")
+        if not p1:
+            print("[!] La contraseña no puede estar vacia. Intenta de nuevo.\n")
+            continue
+        p2 = getpass.getpass(f"Confirma la contraseña de {label}: ")
+        if p1 != p2:
+            print("[!] Las contraseñas no coinciden. Intenta de nuevo.\n")
+            continue
+        return p1
 
-def _try_download_resources_from_ip(ip, port=RESOURCES_HTTP_PORT, path=RESOURCES_HTTP_PATH, timeout=8):
-    """Un solo intento de bajar resources_gf.json de 'ip' por HTTP simple.
-    Devuelve el dict parseado, o None si el host no respondio o el
-    contenido no es JSON valido."""
-    url = f"http://{ip}:{port}{path}"
-    res = subprocess.run(
-        f"curl -s -f --max-time {timeout} {url}",
-        shell=True, capture_output=True, text=True
-    )
-    if res.returncode != 0 or not res.stdout.strip():
-        return None
-    try:
-        return json.loads(res.stdout)
-    except json.JSONDecodeError:
-        return None
-
-def fetch_resources_gf(start_ip=RESOURCES_START_IP, max_octet=254, retries_per_host=2, retry_delay=5):
-    """Descarga resources_gf.json (links, comandos, rutas de archivos y
-    contrasenas propietarias) desde otro rack de la red, asumiendo que
-    cada rack lo sirve por HTTP simple en RESOURCES_HTTP_PORT/RESOURCES_HTTP_PATH.
-
-    Empieza en 'start_ip' (172.24.125.136 por default) y, si ese host no
-    responde tras 'retries_per_host' intentos, prueba el siguiente
-    (ultimo octeto +1), hasta encontrar uno que sirva el archivo o
-    agotar el rango 172.24.125.{start_octet}-254.
-
-    Se guarda una copia local (RESOURCES_FILE) al descargar con exito,
-    que se usa como ultimo recurso si en una corrida posterior (ej. tras
-    un reboot a mitad del provisioning) ningun rack responde.
-    """
-    ip_parts = start_ip.split(".")
-    base = ".".join(ip_parts[:3])
-    start_octet = int(ip_parts[3])
-
-    print("--- Descargando resources_gf.json desde la red ---")
-    for octet in range(start_octet, max_octet + 1):
-        ip = f"{base}.{octet}"
-        for attempt in range(1, retries_per_host + 1):
-            print(f"[*] Probando {ip} (intento {attempt}/{retries_per_host})...")
-            data = _try_download_resources_from_ip(ip)
-            if data is not None:
-                print(f"[✓] resources_gf.json descargado desde {ip}.")
-                with open(RESOURCES_FILE, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                return data
-            if attempt < retries_per_host:
-                time.sleep(retry_delay)
-        print(f"[!] {ip} no respondio. Probando el siguiente host...")
-
-    if os.path.exists(RESOURCES_FILE):
-        print(f"[!] No se pudo descargar resources_gf.json de ningun host "
-              f"({base}.{start_octet}-{max_octet}). Usando la copia local "
-              f"existente de una corrida anterior...")
-        with open(RESOURCES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-
-    raise RuntimeError(
-        f"No se pudo descargar resources_gf.json de ningun host en el rango "
-        f"{base}.{start_octet}-{max_octet}, y no hay copia local previa. "
-        f"Verifica que algun rack este sirviendo el archivo por HTTP en el "
-        f"puerto {RESOURCES_HTTP_PORT}."
-    )
-
-def _apply_resources(data):
-    """Vuelca resources_gf.json sobre las variables globales que el resto
-    del script consume. Lanza RuntimeError si falta algun campo critico
-    (credenciales o red), para no arrancar el provisioning a medias."""
-    global SUDO_PASSWORD, VAULT_PASSWORD, MIRROR_PASSWORD, JUNIPER_ROOT_PASSWORD
-    global RACK_NETWORK_BASE, MIRROR_IP, VRMU_REMOTE_HOST, PYTHON_TOOLS_REMOTE_HOST
-    global LEGO_INFRA_GIT_URL, SECURITY_HARDENED_IMAGE_GIT_URL
-    global DEFAULT_NOMACHINE_URL, GPG_KEY_IMPORT_CMD, CHROME_REPO_LINE
-    global ANSIBLE_PLAYBOOK_FILE, MIRROR_ANSIBLE_DIR, MIRROR_ANSIBLE_PLAYBOOK
-    global PYTHON_TOOLS_FILES, VRMU_ITEMS_TO_DOWNLOAD
-    global LEGO_INFRA_SUBDIR, LEGO_ABMX_TEST_SERVER_SUBDIR, LEGO_ZPE_CONSOLE_SERVER_SUBDIR
-    global NOMACHINE_INSTALL_YAML, SECURITY_HARDENED_IMAGE_SUBDIR, SECURITY_READ_FLG_FILE
-    global DHCPD_CONF_CONTENT, DHCPD6_CONF_CONTENT
-
-    creds = data.get("credentials", {})
-    SUDO_PASSWORD = creds.get("sudo_password")
-    VAULT_PASSWORD = creds.get("vault_password")
-    MIRROR_PASSWORD = creds.get("mirror_password")
-    JUNIPER_ROOT_PASSWORD = creds.get("juniper_root_password")
-
-    net = data.get("network", {})
-    RACK_NETWORK_BASE = net.get("rack_network_base")
-    MIRROR_IP = net.get("mirror_ip")
-    VRMU_REMOTE_HOST = net.get("vrmu_remote_host")
-    PYTHON_TOOLS_REMOTE_HOST = net.get("python_tools_remote_host")
-
-    repos = data.get("git_repos", {})
-    LEGO_INFRA_GIT_URL = repos.get("lego_infra")
-    SECURITY_HARDENED_IMAGE_GIT_URL = repos.get("security_hardened_image")
-
-    urls = data.get("urls", {})
-    DEFAULT_NOMACHINE_URL = urls.get("nomachine_deb")
-    google_gpg_key_url = urls.get("google_gpg_key")
-    GPG_KEY_IMPORT_CMD = (
-        f"wget -q -O - {google_gpg_key_url} | "
-        f"sudo gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/google-chrome.gpg"
-    ) if google_gpg_key_url else None
-    CHROME_REPO_LINE = urls.get("google_chrome_repo_line")
-
-    paths = data.get("paths", {})
-    LEGO_INFRA_SUBDIR = paths.get("lego_infra_subdir")
-    LEGO_ABMX_TEST_SERVER_SUBDIR = paths.get("lego_abmx_test_server_subdir")
-    LEGO_ZPE_CONSOLE_SERVER_SUBDIR = paths.get("lego_zpe_console_server_subdir")
-    NOMACHINE_INSTALL_YAML = paths.get("nomachine_install_yaml")
-    SECURITY_HARDENED_IMAGE_SUBDIR = paths.get("security_hardened_image_subdir")
-    SECURITY_READ_FLG_FILE = paths.get("security_read_flg_file")
-
-    ansible = data.get("ansible", {})
-    ANSIBLE_PLAYBOOK_FILE = ansible.get("playbook_file")
-    MIRROR_ANSIBLE_DIR = ansible.get("mirror_ansible_dir")
-    MIRROR_ANSIBLE_PLAYBOOK = ansible.get("mirror_ansible_playbook")
-
-    PYTHON_TOOLS_FILES = data.get("python_tools_files", [])
-    VRMU_ITEMS_TO_DOWNLOAD = data.get("vrmu_items_to_download", [])
-    DHCPD_CONF_CONTENT = data.get("dhcpd_conf_content")
-    DHCPD6_CONF_CONTENT = data.get("dhcpd6_conf_content")
-
-    required = {
-        "credentials.sudo_password": SUDO_PASSWORD,
-        "credentials.vault_password": VAULT_PASSWORD,
-        "credentials.mirror_password": MIRROR_PASSWORD,
-        "credentials.juniper_root_password": JUNIPER_ROOT_PASSWORD,
-        "network.rack_network_base": RACK_NETWORK_BASE,
-        "network.mirror_ip": MIRROR_IP,
-    }
-    missing = [k for k, v in required.items() if not v]
-    if missing:
-        raise RuntimeError(f"resources_gf.json esta incompleto, faltan campos: {', '.join(missing)}")
-
-def ensure_resources():
+def ensure_credentials():
     """Se llama SIEMPRE como lo primero al arrancar el script (antes de
-    _activate_sudo() y de cualquier otro paso): descarga resources_gf.json
-    desde la red (ver fetch_resources_gf) y aplica sus valores a las
-    variables globales del modulo."""
-    data = fetch_resources_gf()
-    _apply_resources(data)
-    print("[✓] Recursos propietarios (credenciales, links, rutas) cargados desde resources_gf.json.\n")
+    _activate_sudo() y de cualquier otro paso). La primera vez que se
+    corre el script en un equipo, pide interactivamente la contrasena de
+    sudo y la del usuario 'testusr' en el Git-Mirror, cada una dos veces
+    para validar que coincidan, y las guarda en STATE_FILE. En corridas
+    posteriores (o tras un reinicio a mitad del provisioning) las lee
+    directo del state file sin volver a preguntar.
+
+    VAULT_PASSWORD se queda hardcodeada en el codigo por decision
+    explicita -- esta funcion no la toca.
+    """
+    global SUDO_PASSWORD, MIRROR_PASSWORD
+
+    state = load_state()
+    creds = state.get("config", {}).get("_credentials", {})
+    stored_sudo = creds.get("sudo_password")
+    stored_mirror = creds.get("mirror_password")
+
+    if stored_sudo and stored_mirror:
+        SUDO_PASSWORD = stored_sudo
+        MIRROR_PASSWORD = stored_mirror
+        print("[=] Credenciales ya configuradas previamente. Cargando desde el state file...")
+        return
+
+    print("--- Configuracion inicial de credenciales ---")
+    print("Esto solo se pide una vez por equipo; quedan guardadas en el state file")
+    print("para esta y futuras ejecuciones (incluidos los reinicios a mitad del proceso).\n")
+
+    SUDO_PASSWORD = stored_sudo or _prompt_password_twice("sudo (usuario local del equipo)")
+    MIRROR_PASSWORD = stored_mirror or _prompt_password_twice("del usuario 'testusr' en el Git-Mirror (172.24.125.2)")
+
+    state = load_state()
+    state.setdefault("config", {})["_credentials"] = {
+        "sudo_password": SUDO_PASSWORD,
+        "mirror_password": MIRROR_PASSWORD,
+    }
+    save_state(state)
+
+    # El state file ahora contiene contrasenas en texto plano: restringimos
+    # su lectura al dueno del archivo como mitigacion minima.
+    subprocess.run(f"sudo chmod 600 {STATE_FILE}", shell=True, check=False)
+
+    print(f"[✓] Credenciales guardadas en {STATE_FILE} (permisos restringidos a 600).\n")
 
 def _activate_sudo():
     """Activa (o refresca) las credenciales de sudo en cache de forma NO
@@ -408,7 +446,7 @@ def set_ID():
     if last_octet > 254:
         raise ValueError(f"El octeto calculado ({last_octet}) excede el rango valido de IP.")
         
-    ip_address = f"{RACK_NETWORK_BASE}.{last_octet}"
+    ip_address = f"172.24.125.{last_octet}"
     hostname = f"ghostfish-ist-flg-{rack_num:03d}"
 
     config_data = {
@@ -437,7 +475,7 @@ def set_network():
 
     nmcli_cmd = (
         f'sudo nmcli con add con-name "SFC" ifname eno1 type ethernet '
-        f'ipv4.method manual ipv4.addresses {ip_address}/24 gw4 {RACK_NETWORK_BASE}.1 ipv4.dns 8.8.8.8'
+        f'ipv4.method manual ipv4.addresses {ip_address}/24 gw4 172.24.125.1 ipv4.dns 8.8.8.8'
     )
     run_interactive(nmcli_cmd)
 
@@ -467,7 +505,8 @@ def set_network():
     mark_step_completed("set_network")
 
 def _run_scp_from_mirror_once(remote_path, local_destination):
-    cmd = f"scp testusr@{MIRROR_IP}:{remote_path} {local_destination}"
+    mirror_ip = "172.24.125.2"
+    cmd = f"scp testusr@{mirror_ip}:{remote_path} {local_destination}"
     print(f"[CMD] Copiando desde Mirror: {cmd}")
 
     child = pexpect.spawn(cmd, encoding="utf-8", timeout=30)
@@ -520,15 +559,15 @@ def gitconfig_cookie():
     run_scp_from_mirror("~/.gitconfig", f"{user_home}/")
     run_scp_from_mirror("~/.gitcookies", f"{user_home}/")
 
-    sec_repo_path = os.path.join(user_home, SECURITY_HARDENED_IMAGE_SUBDIR)
+    sec_repo_path = os.path.join(user_home, "security-hardened-image")
     if not os.path.exists(sec_repo_path):
-        print(f"[*] Clonando repo {SECURITY_HARDENED_IMAGE_SUBDIR}...")
-        clone_cmd = f"git clone {SECURITY_HARDENED_IMAGE_GIT_URL} {sec_repo_path}"
+        print("[*] Clonando repo security-hardened-image...")
+        clone_cmd = f"git clone https://mfg-partners.googlesource.com/security-hardened-image {sec_repo_path}"
         run_command(clone_cmd)
     else:
-        print(f"[=] El repositorio '{SECURITY_HARDENED_IMAGE_SUBDIR}' ya existe. Omitiendo clonacion...")
+        print("[=] El repositorio 'security-hardened-image' ya existe. Omitiendo clonacion...")
 
-    run_scp_from_mirror(SECURITY_READ_FLG_FILE, f"{user_home}/")
+    run_scp_from_mirror("security-read-flg.json", f"{user_home}/")
     mark_step_completed("gitconfig_cookie")
 
 def flex_tag():
@@ -580,7 +619,7 @@ def run_security_patch():
     print("--- PASO 5: Ejecución de setup-patch.sh ---")
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     user_home = f"/home/{sudo_user}"
-    sec_dir = os.path.join(user_home, SECURITY_HARDENED_IMAGE_SUBDIR)
+    sec_dir = os.path.join(user_home, "security-hardened-image")
     patch_script = os.path.join(sec_dir, "scripts/setup-patch.sh")
 
     if not os.path.exists(patch_script):
@@ -612,13 +651,13 @@ def validate_and_lego_setup():
     run_interactive("sudo add-apt-repository universe -y")
     run_interactive("sudo pip3 install google-cloud-appengine-logging google-cloud-audit-log google-cloud-logging")
 
-    lego_dir = os.path.join(user_home, LEGO_INFRA_SUBDIR)
+    lego_dir = os.path.join(user_home, "lego-infra")
     if not os.path.exists(lego_dir):
-        print(f"[*] Clonando repo {LEGO_INFRA_SUBDIR}...")
-        clone_cmd = f"git clone {LEGO_INFRA_GIT_URL} {lego_dir}"
+        print("[*] Clonando repo lego-infra...")
+        clone_cmd = f"git clone https://mfg-partners.googlesource.com/lego-infra {lego_dir}"
         run_command(clone_cmd)
     else:
-        print(f"[=] El repositorio '{LEGO_INFRA_SUBDIR}' ya existe. Omitiendo clonacion...")
+        print("[=] El repositorio 'lego-infra' ya existe. Omitiendo clonacion...")
 
     ansible_script_dir = os.path.join(lego_dir, "lego_setup/ansible_installation_script")
     print("[*] Ejecutando install-ansible-clean.sh...")
@@ -637,7 +676,7 @@ def setup_nomachine_yaml():
 
     print("--- PASO 7: Actualizacion de URL NoMachine en YAML ---")
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    yaml_path = f"/home/{sudo_user}/{LEGO_INFRA_SUBDIR}/{LEGO_ABMX_TEST_SERVER_SUBDIR}/{NOMACHINE_INSTALL_YAML}"
+    yaml_path = f"/home/{sudo_user}/lego-infra/lego_setup/lego_abmx_test_server/install-nomachine.yaml"
 
     if not os.path.exists(yaml_path):
         raise FileNotFoundError(f"No se encontró el archivo: {yaml_path}")
@@ -665,7 +704,7 @@ def setup_nomachine_yaml():
                 break
 
     if not updated:
-        raise RuntimeError(f"No se encontro el patron 'deb: \"{{{{ nomachine_deb }}}}\"' en {NOMACHINE_INSTALL_YAML}")
+        raise RuntimeError("No se encontro el patron 'deb: \"{{ nomachine_deb }}\"' en install-nomachine.yaml")
 
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
@@ -873,11 +912,11 @@ def run_ansible_playbook():
     run_interactive(downgrade_cmd)
 
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    playbook_dir = f"/home/{sudo_user}/{LEGO_INFRA_SUBDIR}/{LEGO_ABMX_TEST_SERVER_SUBDIR}"
+    playbook_dir = f"/home/{sudo_user}/lego-infra/lego_setup/lego_abmx_test_server"
 
     cmd = (
         f"cd {playbook_dir} && "
-        f"ansible-playbook -i localhost, {ANSIBLE_PLAYBOOK_FILE} -vv "
+        f"ansible-playbook -i localhost, lego_abmx_test_server_setup.yml -vv "
         f"--ask-become-pass --connection=local --vault-id @prompt --flush-cache"
     )
 
@@ -1025,8 +1064,10 @@ def run_final_abmx_config():
     fix_local_dir_cmd = f"sudo chown -R {sudo_user}:{sudo_user} /home/{sudo_user}/.local"
     run_interactive(fix_local_dir_cmd)
 
+    mirror_ip = "172.24.125.2"
+
     ssh_copy_cmd = f"ssh-copy-id -i ~/.ssh/id_rsa.pub {sudo_user}@{ip_address}"
-    cmd_remote_copy = f"ssh {sudo_user}@{MIRROR_IP} '{ssh_copy_cmd}'"
+    cmd_remote_copy = f"ssh {sudo_user}@{mirror_ip} '{ssh_copy_cmd}'"
     print(f"[CMD Interactive] {cmd_remote_copy}")
 
     child_copy = pexpect.spawn("bash", ["-c", cmd_remote_copy], encoding="utf-8", timeout=300)
@@ -1035,7 +1076,7 @@ def run_final_abmx_config():
     while True:
         idx = child_copy.expect([
             r"Are you sure you want to continue connecting \(yes/no/\[fingerprint\]\)\?",
-            rf"testusr@{re.escape(MIRROR_IP)}'s password:",
+            r"testusr@172\.24\.125\.2's password:",
             r"[pP]assword:",
             pexpect.EOF,
             pexpect.TIMEOUT
@@ -1054,10 +1095,10 @@ def run_final_abmx_config():
     child_copy.close()
 
     ansible_cmd = (
-        f"cd {MIRROR_ANSIBLE_DIR} && ansible-playbook -i {ip_address}, {MIRROR_ANSIBLE_PLAYBOOK} "
+        f"cd ~/amp-ansible && ansible-playbook -i {ip_address}, repo_updater/configure-fish-station.yaml "
         f"-vv --ask-become-pass --ask-pass --flush-cache --vault-id @prompt"
     )
-    cmd_remote_ansible = f"ssh -t {sudo_user}@{MIRROR_IP} '{ansible_cmd}'"
+    cmd_remote_ansible = f"ssh -t {sudo_user}@{mirror_ip} '{ansible_cmd}'"
     print(f"[CMD Interactive] {cmd_remote_ansible}")
 
     child_ansible = pexpect.spawn("bash", ["-c", cmd_remote_ansible], encoding="utf-8", timeout=None)
@@ -1068,7 +1109,7 @@ def run_final_abmx_config():
     while True:
         idx = child_ansible.expect([
             r"Are you sure you want to continue connecting \(yes/no/\[fingerprint\]\)\?",
-            rf"testusr@{re.escape(MIRROR_IP)}'s password:",
+            r"testusr@172\.24\.125\.2's password:",
             r"SSH password:",
             r"BECOME password\[defaults to SSH password\]:",
             r"BECOME password:",
@@ -1220,11 +1261,21 @@ network:
 
     mark_step_completed("network_plan")
 
-def _apply_test_network_selection(interface="ens4f0", target_conn="Test Network"):
-    """Logica compartida: fuerza que 'target_conn' quede activa y priorizada en
-    'interface'. No usa is_step_completed ni mark_step_completed: queda a
-    criterio de quien la invoque (ver 'force_test_network_selection' y
-    'ensure_test_network_selected_on_startup') decidir cuando ejecutarla."""
+def force_test_network_selection():
+    """Fuerza que la conexion 'Test Network' quede activa y priorizada en la interfaz ens4f0.
+
+    A diferencia del resto de los pasos del script, este NO se omite aunque ya
+    se haya ejecutado en una corrida anterior: cada vez que se abre
+    gf_provisioning.py (posterior al run final de ABMX) hay que verificar que
+    'Test Network' siga seleccionada, y volver a seleccionarla si no lo esta.
+    Por eso no hay 'if is_step_completed(...): return' aqui; mark_step_completed()
+    se sigue llamando al final solo para fines de registro/reporte."""
+
+    print("--- PASO: Forzar seleccion de 'Test Network' en Ethernet (ens4f0) ---")
+
+    interface = "ens4f0"
+    target_conn = "Test Network"
+
     print(f"[*] Consultando perfiles de NetworkManager asociados a {interface}...")
     result = subprocess.run(
         ["nmcli", "-t", "-f", "NAME,DEVICE,UUID", "connection", "show"],
@@ -1288,45 +1339,7 @@ def _apply_test_network_selection(interface="ens4f0", target_conn="Test Network"
         )
 
     print(f"[✓] '{target_conn}' quedo forzada como conexion activa en {interface}.")
-
-def force_test_network_selection():
-    """Fuerza que la conexion 'Test Network' quede activa y priorizada en la interfaz ens4f0.
-    Paso guardado (se ejecuta una sola vez) dentro del TEST PLAN."""
-    if is_step_completed("force_test_network_selection"):
-        print("[=] Paso 'force_test_network_selection' ya fue ejecutado previamente. Omitiendo...")
-        return
-
-    print("--- PASO: Forzar seleccion de 'Test Network' en Ethernet (ens4f0) ---")
-    _apply_test_network_selection()
     mark_step_completed("force_test_network_selection")
-
-def ensure_test_network_selected_on_startup():
-    """Se ejecuta SIEMPRE que se abre gf_provisioning.py (sin 'is_step_completed').
-    Si el 'run_final_abmx_config' ya se ejecuto anteriormente en este equipo,
-    verifica que 'Test Network' siga siendo la conexion activa en ens4f0; si no
-    lo es (por ejemplo, tras un reinicio o cambio manual), la vuelve a seleccionar."""
-    if not is_step_completed("run_final_abmx_config"):
-        # El run final de ABMX aun no se ha hecho: la seleccion normal de
-        # 'Test Network' la cubre el paso 'force_test_network_selection' del TEST PLAN.
-        return
-
-    interface = "ens4f0"
-    target_conn = "Test Network"
-
-    print(f"[*] Verificando conexion activa en {interface} (post run_final_abmx_config)...")
-    verify = subprocess.run(
-        ["nmcli", "-t", "-f", "GENERAL.CONNECTION", "device", "show", interface],
-        capture_output=True, text=True
-    )
-    active_conn = verify.stdout.strip().split(":", 1)[-1].strip() if verify.stdout else ""
-
-    if active_conn == target_conn:
-        print(f"[=] '{target_conn}' ya se encuentra seleccionada en {interface}. No se requiere accion.")
-        return
-
-    print(f"[!] '{target_conn}' NO esta seleccionada en {interface} "
-          f"(activa: '{active_conn or 'ninguna'}'). Re-seleccionando...")
-    _apply_test_network_selection(interface, target_conn)
 
 def _print_yellow_banner(message):
     """Imprime un mensaje resaltado en amarillo, con borde, para instrucciones manuales."""
@@ -1427,18 +1440,11 @@ def _wait_for_console_connection_enter(banner_message, devices, baud):
 
         print("[!] Se detecto el dispositivo pero no se pudo abrir minicom. Intente nuevamente.")
 
-def _clear_terminal():
-    """Limpia la pantalla de la terminal local (no la sesion minicom). Se usa
-    tras salir de una sesion minicom (ZPE, Juniper) para eliminar el 'ruido'
-    que dejo el volcado en vivo de esa consola (child.logfile_read = sys.stdout)."""
-    os.system("clear")
-
 def _minicom_exit(child):
     """Sale de una sesion minicom con Ctrl+A, X, confirmando el dialogo
     'Leave Minicom?' con ENTER (la opcion 'Yes' viene resaltada por defecto).
     Es seguro llamarla mas de una vez sobre el mismo 'child': si la sesion
-    ya esta cerrada, no hace nada (evita el error 'Bad file descriptor').
-    Al salir, siempre limpia la terminal local (ver '_clear_terminal')."""
+    ya esta cerrada, no hace nada (evita el error 'Bad file descriptor')."""
     if child is None or getattr(child, "closed", False):
         return
     print("[*] Saliendo de minicom (Ctrl+A, X)...")
@@ -1459,7 +1465,10 @@ def _minicom_exit(child):
             child.close(force=True)
         except Exception:
             pass
-        _clear_terminal()
+        # Cada vez que salimos de una consola minicom (ZPE, Juniper) se limpia
+        # la terminal, para no dejar mezclado el output de la sesion serial
+        # con lo que sigue imprimiendo el script.
+        os.system("clear")
 
 def _juniper_expect_or_fail(child, patterns, timeout, error_msg):
     """Helper para juniper_config(): hace expect() sobre 'patterns' y agrega
@@ -1612,12 +1621,12 @@ def juniper_config():
             child, [r"[Nn]ew password:"], timeout=20,
             error_msg="No se recibio el prompt 'New password:' de JUNOS."
         )
-        child.sendline(JUNIPER_ROOT_PASSWORD)
+        child.sendline("google123")
         _juniper_expect_or_fail(
             child, [r"[Rr]etype new password:"], timeout=20,
             error_msg="No se recibio el prompt 'Retype new password:' de JUNOS."
         )
-        child.sendline(JUNIPER_ROOT_PASSWORD)
+        child.sendline("google123")
         _juniper_expect_or_fail(
             child, [r"#\s"], timeout=20,
             error_msg="No se regreso al prompt de configuracion tras fijar la contrasena de root."
@@ -1861,7 +1870,7 @@ def zpe_config():
 
     # --- PASO G: Ejecutar script de configuracion de todos los puertos del ZPE via SSH ---
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    zpe_script_dir = f"/home/{sudo_user}/{LEGO_INFRA_SUBDIR}/{LEGO_ZPE_CONSOLE_SERVER_SUBDIR}"
+    zpe_script_dir = f"/home/{sudo_user}/lego-infra/lego_setup/lego_zpe_console_server"
     ssh_cmd = (
         f"cd {zpe_script_dir} && "
         "ssh -t -t -v -o ConnectTimeout=10 admin@10.0.0.253 < lego_config_zpe_allports.sh"
@@ -2005,13 +2014,18 @@ def vrmu_util_config():
 
     print("--- PASO: Descarga y configuracion de VRMU Util / Viperfish-DVC ---")
 
-    remote_host = VRMU_REMOTE_HOST
+    remote_host = "172.24.125.172"
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     remote_user = sudo_user
     home_dir = f"/home/{sudo_user}"
 
     # --- PASO 1: Descargar por SCP los directorios/archivos necesarios ---
-    items_to_download = VRMU_ITEMS_TO_DOWNLOAD
+    items_to_download = [
+        "viperfish-dvc",
+        "vrmu_util",
+        "ledare_1_*",
+        "FWContainer_EN_3_AP_00_02_00_09.bin",
+    ]
 
     for item in items_to_download:
         remote_path = f"/home/{remote_user}/{item}"
@@ -2098,6 +2112,647 @@ def tross_capture_mac():
 
     print("[✓] MAC del Tross capturada y aplicada exitosamente.")
 
+# ==============================================================================
+# TROSS_CONFIG(): Configuracion automatica del Tross via consola serial
+# (relay por el puerto 17 del ZPE) + reconfiguracion de red del ZPE + VRMU.
+# ==============================================================================
+
+TROSS_PROMPT = r"root@:[^\r\n]*"
+UBOOT_PROMPT = r"=>\s"
+
+def _print_red_banner(message):
+    """Imprime un mensaje resaltado en rojo, con borde, para alertas que
+    requieren la atencion/intervencion del operador. A diferencia de
+    print_ascii_fail() (formato fijo de una sola linea), este helper soporta
+    mensajes multilinea largos, como las instrucciones de correccion de MAC."""
+    RED = "\033[91m\033[1m"
+    RESET = "\033[0m"
+    border = "=" * 80
+    print(f"\n{RED}{border}")
+    for line in message.split("\n"):
+        print(f"[!] {line}")
+    print(f"{border}{RESET}\n")
+
+def _green_wait(seconds, label="Esperando"):
+    """Espera 'seconds' segundos mostrando un contador en verde, tal como
+    pide el runbook para todas las esperas largas (tftp, imager, vrmu_util)."""
+    GREEN = "\033[92m"
+    RESET = "\033[0m"
+    print(f"[*] {label}: esperando {seconds}s...")
+    start = time.time()
+    while True:
+        elapsed = int(time.time() - start)
+        if elapsed >= seconds:
+            break
+        remaining = seconds - elapsed
+        sys.stdout.write(f"\r{GREEN}[{label}] Tiempo restante: {remaining}s...{RESET}")
+        sys.stdout.flush()
+        time.sleep(1)
+    sys.stdout.write(f"\r{GREEN}[{label}] Completado.{' ' * 20}{RESET}\n")
+
+def _update_state_config(extra):
+    """Actualiza state['config'] sin marcar ningun flag/paso como completado;
+    se usa para persistir valores intermedios (como 'tross_lease') que no
+    representan por si mismos un paso terminado del flujo."""
+    state = load_state()
+    state.setdefault("config", {}).update(extra)
+    save_state(state)
+
+def _mac_plus_offset(mac, offset):
+    """Suma 'offset' al ultimo octeto de una MAC (formato 'xx:xx:xx:xx:xx:xx'),
+    tal como pide el runbook para derivar la MAC del lease del Tross a partir
+    de 'tross_mac' (+2 en el ultimo octeto)."""
+    parts = mac.split(":")
+    last = (int(parts[-1], 16) + offset) % 256
+    parts[-1] = f"{last:02x}"
+    return ":".join(parts)
+
+def _open_zpe_console_telnet(port, timeout=30):
+    """Abre una sesion telnet hacia el puerto serial relay del ZPE (Nodegrid),
+    usado para acceder a la consola del Tross conectado fisicamente al puerto
+    17 del ZPE (telnet 10.0.0.253 7017)."""
+    cmd = f"telnet 10.0.0.253 {port}"
+    print(f"[CMD Interactive] {cmd}")
+    child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=timeout)
+    child.logfile_read = sys.stdout
+    return child
+
+def _zpe_console_exit(child):
+    """Sale de una sesion de consola relay del ZPE (Nodegrid) con la secuencia
+    de escape Ctrl+5 seguida de 'q', tal como lo espera el runbook. Segura de
+    llamar mas de una vez sobre el mismo 'child'."""
+    if child is None or getattr(child, "closed", False):
+        return
+    print("[*] Saliendo de la consola relay del ZPE (Ctrl+5, q)...")
+    try:
+        child.send(chr(0x1D))  # Ctrl+5
+        time.sleep(0.5)
+        child.sendline("q")
+        child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=10)
+    except Exception as e:
+        print(f"[!] Advertencia: no se pudo confirmar la salida limpia de la consola del ZPE ({e}).")
+    finally:
+        try:
+            child.close(force=True)
+        except Exception:
+            pass
+        os.system("clear")
+
+def _uboot_break_spam(child, max_seconds=120):
+    """Interrumpe el arranque del Tross 'spameando' espacio hasta que
+    aparezca el prompt '=>' de U-Boot."""
+    print("[*] Interrumpiendo el arranque del Tross (spam de espacio) hasta obtener el prompt '=>' de U-Boot...")
+    deadline = time.time() + max_seconds
+    while time.time() < deadline:
+        child.send(" ")
+        idx = child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=1)
+        if idx == 0:
+            print("[✓] Prompt '=>' de U-Boot detectado.")
+            return
+    print_ascii_fail("No se logro interrumpir el arranque del Tross (nunca aparecio el prompt '=>').")
+    raise RuntimeError("Timeout interrumpiendo el arranque del Tross via U-Boot.")
+
+def _uboot_cmd_check(child, cmd, expected_substrings, timeout=30, fail_msg=None):
+    """Envia 'cmd' en U-Boot y valida que TODAS las cadenas en
+    'expected_substrings' (str o lista) aparezcan en la respuesta antes del
+    siguiente prompt '=>'. Si no, banner de fallo + RuntimeError."""
+    if isinstance(expected_substrings, str):
+        expected_substrings = [expected_substrings]
+    print(f"[CMD U-Boot] {cmd}")
+    child.sendline(cmd)
+    idx = child.expect([UBOOT_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=timeout)
+    output = child.before or ""
+    if idx != 0 or not all(s in output for s in expected_substrings):
+        print_ascii_fail(fail_msg or f"Respuesta inesperada del Tross tras el comando '{cmd}'.")
+        raise RuntimeError(f"Fallo validando la respuesta de U-Boot para '{cmd}'.")
+    print(f"[✓] Respuesta validada para '{cmd}'.")
+    return output
+
+def _wait_for_pattern_with_enters(child, pattern, max_seconds, interval=5, label="Esperando"):
+    """Envia ENTER cada 'interval' segundos (hasta 'max_seconds' en total)
+    mostrando un contador en verde, hasta que 'pattern' aparezca en el stream.
+    Devuelve True si se encontro el patron, False si se agoto el tiempo."""
+    GREEN = "\033[92m"
+    RESET = "\033[0m"
+    elapsed = 0
+    while elapsed < max_seconds:
+        child.sendline("")
+        idx = child.expect([pattern, pexpect.TIMEOUT, pexpect.EOF], timeout=interval)
+        if idx == 0:
+            sys.stdout.write(f"\r{GREEN}[{label}] Completado en {elapsed}s.{' ' * 20}{RESET}\n")
+            return True
+        if idx == 2:
+            return False
+        elapsed += interval
+        sys.stdout.write(f"\r{GREEN}[{label}] Tiempo transcurrido: {elapsed}s (max {max_seconds}s)...{RESET}")
+        sys.stdout.flush()
+    sys.stdout.write(f"\r{GREEN}[{label}] Tiempo agotado tras {max_seconds}s.{' ' * 20}{RESET}\n")
+    return False
+
+def _run_tross_cmd_and_wait(child, cmd, max_wait_seconds, poll_interval=5, label="Esperando",
+                             prompt_pattern=None):
+    """Envia 'cmd' dentro de la sesion del Tross y espera a que regrese el
+    prompt (por defecto TROSS_PROMPT), mostrando un contador en verde mientras
+    dura la espera. Devuelve el texto acumulado (child.before) una vez que el
+    prompt aparece. Lanza RuntimeError si se agota 'max_wait_seconds' o si la
+    sesion se cierra (EOF) antes de tiempo."""
+    prompt_pattern = prompt_pattern or TROSS_PROMPT
+    GREEN = "\033[92m"
+    RESET = "\033[0m"
+    print(f"[CMD Tross] {cmd}")
+    child.sendline(cmd)
+    elapsed = 0
+    while True:
+        idx = child.expect([prompt_pattern, pexpect.TIMEOUT, pexpect.EOF], timeout=poll_interval)
+        if idx == 0:
+            sys.stdout.write(f"\r{GREEN}[{label}] Completado en {elapsed}s.{' ' * 20}{RESET}\n")
+            return child.before or ""
+        if idx == 2:
+            print_ascii_fail(f"La sesion del Tross se cerro inesperadamente durante '{cmd}'.")
+            raise RuntimeError(f"EOF inesperado esperando la finalizacion de '{cmd}'.")
+        elapsed += poll_interval
+        sys.stdout.write(f"\r{GREEN}[{label}] Tiempo transcurrido: {elapsed}s (max {max_wait_seconds}s)...{RESET}")
+        sys.stdout.flush()
+        if elapsed >= max_wait_seconds:
+            print_ascii_fail(f"Timeout esperando que finalice '{cmd}' en el Tross.")
+            raise RuntimeError(f"Timeout ({max_wait_seconds}s) esperando la finalizacion de '{cmd}'.")
+
+def _run_local_cmd_with_wait(cmd, max_wait_seconds, poll_interval=10, label="Esperando"):
+    """Ejecuta 'cmd' localmente (bash -c) mostrando un contador en verde
+    mientras corre, hasta 'max_wait_seconds'. Devuelve (output, exit_code)
+    sin lanzar excepcion por codigo de salida no-cero (el llamador decide
+    que hacer con la salida, ya que aqui lo relevante es el TEXTO de
+    respuesta, no solo el exit code)."""
+    GREEN = "\033[92m"
+    RESET = "\033[0m"
+    marker = f"__CMDDONE_{uuid.uuid4().hex}__"
+    print(f"[CMD Local] {cmd}")
+    child = pexpect.spawn("bash", ["-c", f"{cmd}; echo {marker}$?"], encoding="utf-8",
+                           timeout=max_wait_seconds + 60)
+    child.logfile_read = sys.stdout
+    elapsed = 0
+    while True:
+        idx = child.expect([rf"{marker}(\d+)", pexpect.TIMEOUT, pexpect.EOF], timeout=poll_interval)
+        if idx == 0:
+            exit_code = int(child.match.group(1))
+            output = child.before or ""
+            child.close(force=True)
+            sys.stdout.write(f"\r{GREEN}[{label}] Completado en {elapsed}s.{' ' * 20}{RESET}\n")
+            return output, exit_code
+        if idx == 2:
+            child.close(force=True)
+            print_ascii_fail(f"La sesion local se cerro inesperadamente ejecutando '{cmd}'.")
+            raise RuntimeError(f"EOF inesperado ejecutando '{cmd}'.")
+        elapsed += poll_interval
+        sys.stdout.write(f"\r{GREEN}[{label}] Tiempo transcurrido: {elapsed}s (max {max_wait_seconds}s)...{RESET}")
+        sys.stdout.flush()
+        if elapsed >= max_wait_seconds:
+            child.close(force=True)
+            print_ascii_fail(f"Timeout esperando que finalice '{cmd}'.")
+            raise RuntimeError(f"Timeout ({max_wait_seconds}s) esperando la finalizacion de '{cmd}'.")
+
+def _tross_reconfigure_zpe_eth1():
+    """Se conecta por SSH a admin@10.0.0.253 (ZPE) y configura ETH1 en modo
+    estatico (10.0.0.253/8, gateway 10.0.0.254), validando el 'show' contra
+    la respuesta esperada, y hace 'commit' + 'exit' confirmando la perdida de
+    cambios no comiteados con 'yes'."""
+    print("[*] Conectando por SSH a admin@10.0.0.253 para reconfigurar ETH1...")
+    ssh_cmd = "ssh admin@10.0.0.253"
+    print(f"[CMD Interactive] {ssh_cmd}")
+    child = pexpect.spawn("bash", ["-c", ssh_cmd], encoding="utf-8", timeout=60)
+    child.logfile_read = sys.stdout
+
+    idx = child.expect([
+        r"Are you sure you want to continue connecting",
+        r"[Pp]assword:",
+        pexpect.TIMEOUT,
+        pexpect.EOF
+    ], timeout=30)
+
+    if idx == 0:
+        child.sendline("yes")
+        idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+        if idx != 0:
+            print_ascii_fail()
+            raise RuntimeError("No se recibio el prompt de password SSH del ZPE tras aceptar el fingerprint.")
+    elif idx != 1:
+        print_ascii_fail()
+        raise RuntimeError("No se recibio el prompt de password SSH del ZPE (10.0.0.253).")
+
+    print("[*] Enviando password 'admin'...")
+    child.sendline("admin")
+    idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+    if idx != 0:
+        print_ascii_fail()
+        raise RuntimeError("No se pudo autenticar por SSH contra el ZPE (10.0.0.253).")
+
+    commands = [
+        "cd /settings/network_connections/ETH1",
+        "set ipv4_mode=static",
+        "set ipv4_address=10.0.0.253",
+        "set ipv4_bitmask=8",
+        "set ipv4_gateway=10.0.0.254",
+    ]
+    for cmd in commands:
+        child.sendline(cmd)
+        idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        if idx != 0:
+            print_ascii_fail()
+            child.close(force=True)
+            raise RuntimeError(f"El ZPE no respondio como se esperaba tras el comando '{cmd}'.")
+
+    child.sendline("show")
+    idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+    if idx != 0:
+        print_ascii_fail()
+        child.close(force=True)
+        raise RuntimeError("No se recibio la salida del comando 'show' tras configurar ETH1.")
+
+    show_output = child.before or ""
+    required_lines = [
+        "name: ETH1",
+        "type: ethernet",
+        "ethernet_interface = eth1",
+        "ipv4_mode = static",
+        "ipv4_address = 10.0.0.253",
+        "ipv4_bitmask = 8",
+        "ipv4_gateway = 10.0.0.254",
+    ]
+    if not all(line in show_output for line in required_lines):
+        print_ascii_fail(
+            "La salida de 'show' en ETH1 no coincide con lo esperado tras la "
+            "reconfiguracion. Se requiere revisión manual (atencion del operador)."
+        )
+        child.close(force=True)
+        raise RuntimeError("Validacion de 'show' en ETH1 fallo tras la reconfiguracion del ZPE.")
+
+    print("[✓] Configuracion de ETH1 validada correctamente.")
+
+    child.sendline("commit")
+    child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+
+    child.sendline("exit")
+    idx = child.expect([
+        r"Uncommited changes will be lost\. Confirm exit\? \(yes, no\)",
+        r"#\s",
+        pexpect.TIMEOUT,
+        pexpect.EOF
+    ], timeout=15)
+    if idx == 0:
+        child.sendline("yes")
+        child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=15)
+
+    child.close(force=True)
+    print("[✓] Sesion SSH hacia el ZPE cerrada.")
+
+def TROSS_CONFIG():
+    """Configuracion automatica completa del Tross: registra su MAC en el DHCP,
+    lo bootea y flashea via consola serial (relay del puerto 17 del ZPE),
+    reconfigura la red del ZPE (ETH1 estatica), obtiene el 'lease' de red del
+    Tross a partir de las leases del ZPE, y corre el flasheo/actualizacion de
+    firmware con vrmu_util."""
+    if is_step_completed("TROSS_CONFIG"):
+        print("[=] Paso 'TROSS_CONFIG' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: TROSS_CONFIG - Configuracion automatica del Tross ---")
+
+    state = load_state()
+    tross_mac = state.get("config", {}).get("tross_mac")
+    if not tross_mac:
+        raise RuntimeError(
+            "No se encontro 'tross_mac' en el estado. Asegurate de correr "
+            "'tross_capture_mac' antes de 'TROSS_CONFIG'."
+        )
+
+    # --- PASO 0: Asegurar que /etc/dhcp/dhcpd.conf tenga la MAC del Tross ---
+    print(f"[*] Asegurando que /etc/dhcp/dhcpd.conf tenga la MAC del Tross ({tross_mac})...")
+    new_line = f"host tross {{ hardware ethernet {tross_mac}; fixed-address 10.0.0.251; }}"
+    sed_cmd = (
+        "sudo sed -i '/host tross { hardware ethernet/c\\"
+        f"{new_line}' /etc/dhcp/dhcpd.conf"
+    )
+    run_interactive(sed_cmd)
+    run_interactive(f"sudo grep -q '{tross_mac}' /etc/dhcp/dhcpd.conf")
+
+    print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
+    run_interactive("sudo systemctl restart isc-dhcp-server")
+    run_interactive("sudo systemctl restart isc-dhcp-server6")
+
+    # --- PASO 1: Prompt interactivo (amarillo) para conectar el cable consola ---
+    _print_yellow_banner(
+        "Conecte un cable consola (TROSS) al puerto CONSOLE del TROSS y el "
+        "otro extremo al puerto 17 del ZPE."
+    )
+    input("Presione ENTER para continuar...")
+
+    child = _open_zpe_console_telnet(7017)
+
+    try:
+        # --- PASO 2: Interrumpir el arranque hasta el prompt '=>' de U-Boot ---
+        _uboot_break_spam(child)
+
+        # --- PASO 3 (paso1 del runbook): tftpboot del uboot, con reintento
+        # completo del bloque si la respuesta no coincide con lo esperado ---
+        while True:
+            child.sendline(
+                "setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254"
+            )
+            child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+            child.sendline("setenv serverip 10.0.0.254")
+            child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+
+            print("[CMD U-Boot] tftpboot 0x60000000 tross/uboot_planet-hurricane3.bin")
+            child.sendline("tftpboot 0x60000000 tross/uboot_planet-hurricane3.bin")
+            idx = child.expect([r"Load address: 0x60000000", pexpect.TIMEOUT, pexpect.EOF], timeout=60)
+            output = child.before or ""
+            required = [
+                "Change GMAC speed to 1000MB",
+                "Using gmac-0@mdk device",
+                "TFTP from server 10.0.0.254",
+                "our IP address is 10.0.0.251",
+                "Filename 'tross/uboot_planet-hurricane3.bin'",
+            ]
+            if idx == 0 and all(m in output for m in required):
+                print("[✓] Respuesta de 'tftpboot' (paso1) validada correctamente.")
+                child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+                break
+            print("[!] La respuesta de 'tftpboot' no cumplio lo esperado (paso1). Reintentando paso1...")
+
+        # --- PASO 4 (paso2 del runbook): sf probe/erase/write/erase + reset ---
+        _uboot_cmd_check(
+            child, "sf probe",
+            "SF: Detected MX25L12805 with page size 256 Bytes, erase size 64 KiB, total 16 MiB"
+        )
+        _uboot_cmd_check(
+            child, "sf erase 0x0 0x100000",
+            "SF: 1048576 bytes @ 0x0 Erased: OK"
+        )
+        _uboot_cmd_check(
+            child, "sf write 0x60000000 0x0 0x100000",
+            "SF: 1048576 bytes @ 0x0 Written: OK"
+        )
+        _uboot_cmd_check(
+            child, "sf erase 0x1c0000 0x10000",
+            "SF: 65536 bytes @ 0x1c0000 Erased: OK"
+        )
+
+        print("[CMD U-Boot] reset")
+        child.sendline("reset")
+        _uboot_break_spam(child)
+
+        # --- PASO 5: Booteo por red (netboot) hacia el kernel del Tross ---
+        child.sendline(
+            "setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254"
+        )
+        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+        child.sendline("setenv serverip 10.0.0.254")
+        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+        child.sendline("setenv goog_boot netboot;setenv verify-sig 0;run set_ramboot")
+        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+        print("[CMD U-Boot] tftpboot 0x70000000 tross/combined.uImage;run boot_kernel")
+        child.sendline("tftpboot 0x70000000 tross/combined.uImage;run boot_kernel")
+
+        # --- PASO 6: Esperar ~2 minutos, dando ENTER cada 5s, hasta 'login:' ---
+        if not _wait_for_pattern_with_enters(child, r"login:", max_seconds=120, interval=5,
+                                              label="Esperando prompt 'login:' del Tross"):
+            print_ascii_fail("No se recibio el prompt 'login:' del Tross tras el boot por red.")
+            raise RuntimeError("Timeout esperando el prompt 'login:' del Tross.")
+
+        # --- PASO 7: Login ---
+        print("[*] Ingresando credenciales de login (root / google)...")
+        child.sendline("root")
+        idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        if idx != 0:
+            print_ascii_fail()
+            raise RuntimeError("No se recibio el prompt 'Password:' del Tross tras el usuario 'root'.")
+        child.sendline("google")
+        idx = child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        if idx != 0:
+            print_ascii_fail()
+            raise RuntimeError("No se pudo iniciar sesion en el Tross (root/google).")
+
+        # --- PASO 8: killall rcS; uname -a ---
+        child.sendline("killall rcS")
+        child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+
+        _run_tross_cmd_and_wait(
+            child, "uname -a", max_wait_seconds=20, poll_interval=5,
+            label="Validando kernel del Tross"
+        )
+        uname_output = child.before or ""
+        if "4.19.238-planet-hurricane3 #1" not in uname_output:
+            print_ascii_fail("La version de kernel del Tross no coincide con la esperada (uname -a).")
+            raise RuntimeError("Validacion de 'uname -a' fallo en el Tross.")
+        print("[✓] Kernel del Tross validado (4.19.238-planet-hurricane3 #1).")
+
+        # --- PASO 9: cd /tmp; descargar imageset.tgz por tftp, con reintento
+        # en caso de mismatch de MAC (loop hasta que no falle) ---
+        child.sendline("cd /tmp")
+        child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=15)
+
+        while True:
+            tftp_output = _run_tross_cmd_and_wait(
+                child, "tftp -g -r tross/imageset.tgz 10.0.0.254",
+                max_wait_seconds=180, poll_interval=5,
+                label="Descargando imageset.tgz por tftp"
+            )
+            if "server write failed" in tftp_output or "Network is unreachable" in tftp_output:
+                _print_red_banner(
+                    "MAC del tross no coincide, porfavor corrijala en otra terminal con\n"
+                    "\n"
+                    "sudo gedit /etc/dhcp/dhcpd.conf\n"
+                    "\n"
+                    "y reinicie los servicios con:\n"
+                    "\n"
+                    "sudo systemctl restart isc-dhcp-server\n"
+                    "sudo systemctl restart isc-dhcp-server6\n"
+                    "\n"
+                    "y de enter para continuar..."
+                )
+                input("Presione ENTER para continuar...")
+                continue
+            print("[✓] Descarga de imageset.tgz completada sin errores de red.")
+            break
+
+        # --- PASO 10: Esperar 3 minutos hasta recuperar el prompt 'root@:/tmp' ---
+        if not _wait_for_pattern_with_enters(child, r"root@:/tmp", max_seconds=180, interval=5,
+                                              label="Esperando prompt 'root@:/tmp'"):
+            print_ascii_fail("No se recibio el prompt 'root@:/tmp' tras esperar 3 minutos.")
+            raise RuntimeError("Timeout esperando el prompt 'root@:/tmp' del Tross.")
+
+        # --- PASO 11: ls ---
+        ls_output = _run_tross_cmd_and_wait(child, "ls", max_wait_seconds=20, poll_interval=5,
+                                             label="Listando /tmp")
+        expected_files = ["StatsWB.Flow.lock", "StatsWB.Port.lock", "core", "imageset.tgz", "sandcastle"]
+        if not all(f in ls_output for f in expected_files):
+            print_ascii_fail("El listado de /tmp en el Tross no contiene los archivos esperados.")
+            raise RuntimeError("Validacion de 'ls' fallo en el Tross.")
+        print("[✓] Listado de /tmp validado correctamente.")
+
+        # --- PASO 12: md5sum ---
+        md5_output = _run_tross_cmd_and_wait(
+            child, "md5sum imageset.tgz", max_wait_seconds=30, poll_interval=5,
+            label="Calculando md5sum de imageset.tgz"
+        )
+        if "3e52decb2b76aa84f83c5ae97e520c77" not in md5_output:
+            print_ascii_fail("El md5sum de imageset.tgz no coincide con el esperado.")
+            raise RuntimeError("Validacion de 'md5sum' fallo en el Tross.")
+        print("[✓] md5sum de imageset.tgz validado correctamente.")
+
+        # --- PASO 13: Extraer e imagear (tar + imager), esperar ~20 minutos ---
+        imager_output = _run_tross_cmd_and_wait(
+            child,
+            "tar Oxzf imageset.tgz tools-cf.tgz | tar xz && netconfig=no ./imager ab",
+            max_wait_seconds=1500, poll_interval=10,
+            label="Ejecutando imager (aprox. 20 minutos)"
+        )
+        required_tail = [
+            "md5 of '/tmp/imageset.tgz' = 142c29970d23c3e4819f144812a64b79",
+            "sudo mount -a -t vfat",
+            "Setting regionselect to a/0",
+            "sync",
+        ]
+        if not all(s in imager_output for s in required_tail):
+            print_ascii_fail(
+                "La salida del comando 'imager' no contiene lo esperado. "
+                "Se requiere atencion del operador."
+            )
+            raise RuntimeError("Validacion de la salida de 'imager' fallo en el Tross.")
+        print("[✓] Imageo del Tross completado y validado correctamente.")
+
+        # --- PASO 14: reboot + interrumpir arranque de nuevo ---
+        print("[CMD Tross] reboot")
+        child.sendline("reboot")
+        _uboot_break_spam(child)
+
+        # --- PASO 15: Configurar bootcase_1 / bootdelay y guardar entorno ---
+        child.sendline('setenv bootcase_1 "bootcount 2;run pri_cf_bootcmd"')
+        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+        child.sendline("setenv bootdelay 3")
+        child.expect([UBOOT_PROMPT, pexpect.TIMEOUT], timeout=15)
+
+        _uboot_cmd_check(
+            child, "saveenv",
+            ["Saving Environment to SPI Flash...",
+             "SF: Detected MX25L12805 with page size 256 Bytes, erase size 64 KiB, total 16 MiB",
+             "Erasing SPI flash...Writing to SPI flash...done"],
+            timeout=30,
+            fail_msg="La respuesta de 'saveenv' no es la esperada. Se requiere atencion del operador."
+        )
+
+        # --- PASO 16: reset y esperar login: ---
+        print("[CMD U-Boot] reset")
+        child.sendline("reset")
+        if not _wait_for_pattern_with_enters(child, r"login:", max_seconds=120, interval=5,
+                                              label="Esperando prompt 'login:' tras reset"):
+            print_ascii_fail("No se recibio el prompt 'login:' del Tross tras 'reset'.")
+            raise RuntimeError("Timeout esperando el prompt 'login:' del Tross tras 'reset'.")
+
+        print("[*] Ingresando credenciales de login (root / google)...")
+        child.sendline("root")
+        idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        if idx != 0:
+            print_ascii_fail()
+            raise RuntimeError("No se recibio el prompt 'Password:' del Tross tras el usuario 'root'.")
+        child.sendline("google")
+        idx = child.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        if idx != 0:
+            print_ascii_fail()
+            raise RuntimeError("No se pudo iniciar sesion en el Tross (root/google) tras 'reset'.")
+
+    finally:
+        # --- PASO 17: Salir de la consola relay del ZPE (Ctrl+5, q) ---
+        _zpe_console_exit(child)
+
+    # --- PASO 18: Reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica) ---
+    _tross_reconfigure_zpe_eth1()
+
+    # --- PASO 19: Reconectar por telnet a la consola del Tross y obtener
+    # el 'lease' de red a partir de las leases del ZPE ---
+    child2 = _open_zpe_console_telnet(7017)
+    try:
+        child2.sendline("")
+        idx = child2.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+        if idx != 0:
+            print_ascii_fail()
+            raise RuntimeError(
+                "No se pudo reconectar a la consola del Tross via telnet tras reconfigurar el ZPE."
+            )
+
+        leases_output = _run_tross_cmd_and_wait(
+            child2, "cat /mnt/region_config/dhcpd/dhcpd.rymden.leases",
+            max_wait_seconds=30, poll_interval=5, label="Leyendo leases del ZPE"
+        )
+
+        target_mac = _mac_plus_offset(tross_mac, 2)
+        print(f"[*] Buscando el lease asociado a la MAC {target_mac} (tross_mac + 2)...")
+        blocks = re.findall(r"lease\s+([\d.]+)\s*\{(.*?)\n\}", leases_output, re.DOTALL)
+        matches = [ip for ip, body in blocks if target_mac.lower() in body.lower()]
+        if not matches:
+            print_ascii_fail(f"No se encontro ningun lease asociado a la MAC {target_mac} en el ZPE.")
+            raise RuntimeError("No se pudo determinar 'tross_lease' a partir de las leases del ZPE.")
+
+        tross_lease = matches[-1]
+        print(f"[+] tross_lease detectado: {tross_lease}")
+        _update_state_config({"tross_lease": tross_lease})
+
+        # --- PASO 20: Ping al tross_lease desde la consola del ZPE ---
+        print(f"[*] Pingueando {tross_lease} desde la consola del ZPE...")
+        child2.sendline(f"ping -c 3 {tross_lease}")
+        idx = child2.expect([r"64 bytes from", pexpect.TIMEOUT, pexpect.EOF], timeout=30)
+        if idx != 0:
+            print_ascii_fail(f"No se recibio respuesta de ping desde {tross_lease}.")
+            raise RuntimeError("Validacion de 'ping' al tross_lease fallo.")
+        child2.expect([TROSS_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=15)
+        print(f"[✓] Ping a {tross_lease} exitoso.")
+    finally:
+        _zpe_console_exit(child2)
+
+    # --- PASO 21: Flasheo del Tross via vrmu_util (comando repetido 2 veces,
+    # con espera de ~10 minutos y contador verde en cada corrida) ---
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    home_dir = f"/home/{sudo_user}"
+    flash_cmd = (
+        f"cd {home_dir} && ./vrmu_util --api=/rmu_util --api=/macros/flash "
+        f"--hostname={tross_lease} --srec_prefix=ledare_1_8_5 --logtostderr "
+        f"--envelope_enabled=false"
+    )
+
+    for intento in (1, 2):
+        print(f"[*] Ejecutando vrmu_util (flash) - intento {intento}/2...")
+        _run_local_cmd_with_wait(
+            flash_cmd, max_wait_seconds=720, poll_interval=10,
+            label=f"vrmu_util flash (intento {intento}/2, aprox. 10 minutos)"
+        )
+
+    # --- PASO 22: Actualizacion de firmware periferico via vrmu_util ---
+    upgrade_cmd = (
+        f"cd {home_dir} && ./vrmu_util --envelope_enabled=false --hostname={tross_lease} "
+        f"--logtostderr --api=/api/peripheral/upgrade "
+        f"--peripheral_firmware_filename=FWContainer_EN_3_AP_00_02_00_09.bin"
+    )
+    print("[*] Ejecutando vrmu_util (peripheral upgrade)...")
+    upgrade_output, _ = _run_local_cmd_with_wait(
+        upgrade_cmd, max_wait_seconds=720, poll_interval=10,
+        label="vrmu_util peripheral upgrade"
+    )
+
+    if "INTERNAL: Upgrade failed: 1" in upgrade_output:
+        print_ascii_fail("La actualizacion de firmware periferico del Tross fallo (Upgrade failed: 1).")
+        raise RuntimeError("vrmu_util peripheral upgrade reporto 'Upgrade failed: 1'.")
+    elif "INTERNAL: Upgrade failed: 2" in upgrade_output:
+        print("[✓] vrmu_util peripheral upgrade completado (respuesta esperada: 'Upgrade failed: 2').")
+    else:
+        print_ascii_fail(
+            "La respuesta de vrmu_util (peripheral upgrade) no coincide con ninguno de los "
+            "resultados esperados. Se requiere atencion del operador."
+        )
+        raise RuntimeError("Respuesta inesperada de vrmu_util en 'peripheral upgrade'.")
+
+    _print_green_banner("CONFIGURACION DEL TROSS (TROSS_CONFIG) COMPLETADA EXITOSAMENTE.")
+    mark_step_completed("TROSS_CONFIG", {"tross_lease": tross_lease})
+
 def download_python_tools():
     if is_step_completed("download_python_tools"):
         print("[=] Paso 'download_python_tools' ya fue ejecutado previamente. Omitiendo...")
@@ -2105,11 +2760,17 @@ def download_python_tools():
 
     print("--- PASO: Descarga de Herramientas Python por SCP ---")
     
-    remote_host = PYTHON_TOOLS_REMOTE_HOST
+    remote_host = "172.24.125.174"
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     remote_user = sudo_user
     
-    files_to_download = PYTHON_TOOLS_FILES
+    files_to_download = [
+        "dhcpd.py",
+        "UUT_test_case.py",
+        "share.py",
+        "reboot.py",
+        "U22Tocinos"
+    ]
     
     destination_dir = "."
     
@@ -2184,7 +2845,7 @@ def fix_chrome():
     _retry_download(lambda: run_interactive(GPG_KEY_IMPORT_CMD), "descarga de llave GPG de Google")
 
     print("[*] Configurando el repositorio oficial de Google Chrome...")
-    repo_cmd = f'echo "{CHROME_REPO_LINE}" | sudo tee /etc/apt/sources.list.d/google-chrome.list'
+    repo_cmd = 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list'
     run_interactive(repo_cmd)
 
     print("[*] Actualizando listas de paquetes de apt e instalando Google Chrome Stable...")
@@ -2306,19 +2967,12 @@ def end_config_reboot():
     log_final_summary()
 
 if __name__ == "__main__":
-    ensure_resources()
+    ensure_credentials()
     print("[*] Activando sudo de forma automatica...")
     if _activate_sudo():
         print("[✓] Sudo activado correctamente.")
     else:
         print("[!] No se pudo confirmar la activacion inicial de sudo.")
-
-    print("[*] Verificando seleccion de 'Test Network' (aplica si el run final de ABMX ya se ejecuto)...")
-    ensure_test_network_selected_on_startup()
-
-##############################################################################################
-#TEST PLAN
-##############################################################################################
     set_ID()
     set_network()
     gitconfig_cookie()
@@ -2336,15 +2990,8 @@ if __name__ == "__main__":
     juniper_config()
     zpe_config()
     vrmu_util_config()
+    tross_capture_mac()
+    TROSS_CONFIG()
     download_python_tools()
     fix_chrome()
-##############################################################################################
-#Instrument config
-############################################################################################## 
-    tross_capture_mac()
-    juniper_config()
-    zpe_config()
-##############################################################################################
-#reboot
-##############################################################################################       
     end_config_reboot()
