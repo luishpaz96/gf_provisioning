@@ -256,10 +256,7 @@ def print_ascii_pass(message="Mirror de apt + Ansible Playbook: OK."):
 _state_perms_fixed = False
 
 def fix_state_file_permissions():
-    """Corrige el ownership de STATE_FILE. Se cachea con un flag global para
-    correr el 'sudo chown' una sola vez por ejecucion del script en vez de
-    en cada load_state()/save_state() (que se llaman decenas de veces),
-    evitando spawnear un subprocess+shell innecesario en cada uno."""
+    """Corrige el ownership de STATE_FILE una sola vez por ejecucion."""
     global _state_perms_fixed
     if _state_perms_fixed:
         return
@@ -269,17 +266,11 @@ def fix_state_file_permissions():
         _state_perms_fixed = True
 
 def _atomic_write_json(filepath, data):
-    """Escribe 'data' como JSON en 'filepath' de forma ATOMICA: primero se
-    escribe a un archivo temporal en el mismo directorio y luego se reemplaza
-    el destino final con os.replace() (atomico en POSIX). Asi, si el proceso
-    se interrumpe a mitad de la escritura (Ctrl+C, crash, corte de luz), el
-    archivo original queda intacto en vez de quedar truncado/corrupto -- que
-    es justamente lo que paso cuando 'json.dump' escribia directo sobre
-    STATE_FILE y el proceso se corto a mitad de camino.
-
-    Ademas, antes de reemplazar, deja una copia de respaldo
-    ('<filepath>.bak') del contenido previo, para poder recuperarlo si hiciera
-    falta (ver _load_json_state)."""
+    """Escribe 'data' como JSON de forma atomica: primero a un archivo
+    temporal, luego reemplaza el destino con os.replace() (atomico en
+    POSIX), evitando dejar el archivo truncado si el proceso se interrumpe
+    a mitad de la escritura. Deja ademas un respaldo '<filepath>.bak' del
+    contenido previo."""
     if os.path.exists(filepath):
         try:
             shutil.copyfile(filepath, filepath + ".bak")
@@ -293,12 +284,9 @@ def _atomic_write_json(filepath, data):
     os.replace(tmp_path, filepath)
 
 def _load_json_state(filepath):
-    """Carga el JSON de 'filepath'. Si el archivo esta corrupto (JSON
-    invalido -- por ejemplo, truncado a mitad de una escritura de una
-    corrida anterior interrumpida), intenta recuperarlo automaticamente
-    desde '<filepath>.bak' (el respaldo que deja _atomic_write_json antes de
-    cada escritura). Si tampoco se puede recuperar, falla con un mensaje
-    claro y accionable en vez de dejar pasar el JSONDecodeError crudo."""
+    """Carga el JSON de 'filepath'. Si esta corrupto, intenta recuperarlo
+    desde '<filepath>.bak'; si tampoco es posible, falla con un mensaje
+    claro en vez de propagar el JSONDecodeError."""
     if not os.path.exists(filepath):
         return {"flags": {}, "config": {}}
     try:
@@ -346,14 +334,11 @@ def mark_step_completed(step_name, extra_config=None):
 # ==============================================================================
 # ESTADO DEDICADO DE TROSS_CONFIG (tross_config.json)
 # ==============================================================================
-# Las banderas/config internas de TROSS_CONFIG (las 13 etapas + el flag final
-# 'TROSS_CONFIG' + 'tross_lease') viven en su PROPIO archivo, separado de
-# provisioning_state.json. Asi, si hace falta re-correr todo el proceso del
-# Tross desde cero, alcanza con borrar tross_config.json (sin tocar el resto
-# del estado del provisioning: credenciales, IP, MACs de ZPE/Juniper, etc.).
-# 'tross_mac' (capturado por tross_capture_mac) sigue viviendo en el state
-# file principal, ya que es un dato de entrada de TROSS_CONFIG, no un
-# progreso interno de este proceso.
+# Las banderas y config de las 13 etapas de TROSS_CONFIG viven en su propio
+# archivo, separado de provisioning_state.json: para rehacer el proceso del
+# Tross desde cero alcanza con borrar tross_config.json, sin afectar el
+# resto del estado del provisioning. 'tross_mac' sigue en el state file
+# principal, ya que es un dato de entrada, no un progreso de este proceso.
 TROSS_STATE_FILE = "tross_config.json"
 _tross_state_perms_fixed = False
 
@@ -1597,10 +1582,8 @@ def juniper_config():
     child.logfile_read = sys.stdout
 
     try:
-        # NOTA: los patrones de prompt NO se anclan con '\s*$' porque minicom
-        # refresca periodicamente su barra de estado inferior, lo que puede
-        # agregar bytes al final del buffer y romper un anclaje estricto al
-        # final de la cadena. Basta con que el patron aparezca en el stream.
+        # Los patrones no se anclan al final de linea: minicom refresca su
+        # barra de estado periodicamente, lo que rompe un anclaje estricto.
 
         # --- PASO B: Login ---
         print("[*] Buscando prompt de login del Juniper...")
@@ -1846,10 +1829,8 @@ def zpe_config():
 
     try:
         # --- PASO B: Login automatico (user: admin / password: admin) ---
-        # NOTA: los patrones de prompt NO se anclan con '\s*$' porque minicom
-        # refresca periodicamente su barra de estado inferior, lo que puede
-        # agregar bytes al final del buffer y romper un anclaje estricto al
-        # final de la cadena. Basta con que el patron aparezca en el stream.
+        # Los patrones no se anclan al final de linea: minicom refresca su
+        # barra de estado periodicamente, lo que rompe un anclaje estricto.
         print("[*] Buscando prompt de login del ZPE...")
         child.sendline("")
         idx = child.expect([
@@ -2130,11 +2111,8 @@ def vrmu_util_config():
         _scp_download(remote_user, remote_host, remote_path, destination=".")
 
     # --- PASO 2: Copiar la imagen 'tross' de viperfish-dvc/vin-sweep a /tftpboot/ ---
-    # Comandos enviados por separado (no encadenados con '&&'), tal como en el runbook.
-    # NOTA: se agrega 'sudo' al 'cp' (no presente en el runbook original) porque
-    # /tftpboot/ es un directorio de sistema que normalmente requiere permisos
-    # elevados, siguiendo la misma convencion usada en el resto del script
-    # para escrituras fuera del home del usuario.
+    # Comandos enviados por separado (no encadenados con '&&'), como pasos independientes.
+    # /tftpboot/ requiere permisos elevados, de ahi el 'sudo' en el cp.
     print("[*] Copiando imagen 'tross' a /tftpboot/...")
     _run_shell_sequence([
         "cd viperfish-dvc/vin-sweep/",
@@ -2142,7 +2120,7 @@ def vrmu_util_config():
     ])
 
     # --- PASO 3: Copiar vrmu_util al home del usuario y darle permisos de ejecucion ---
-    # Comandos enviados por separado (no encadenados con '&&'), tal como en el runbook.
+    # Comandos enviados por separado (no encadenados con '&&'), como pasos independientes.
     print("[*] Copiando vrmu_util al home y asignando permisos...")
 
     downloaded_vrmu_path = os.path.abspath("vrmu_util")
@@ -2175,7 +2153,7 @@ def tross_capture_mac():
 
     print("--- PASO: Captura de la MAC del Tross ---")
 
-    _print_yellow_banner("Porfavor introduzca la direccion MAC del Tross")
+    _print_yellow_banner("Por favor, introduzca la direccion MAC del Tross.")
     mac_input = input("MAC del Tross: ").strip()
 
     # Normalizamos: nos quedamos solo con los caracteres hexadecimales,
@@ -2210,59 +2188,37 @@ def tross_capture_mac():
     print("[✓] MAC del Tross capturada y aplicada exitosamente.")
 
 # ==============================================================================
-# TROSS_CONFIG(): Configuracion automatica del Tross via consola serial
+# TROSS_CONFIG(): configuracion automatica del Tross via consola serial
 # (relay por el puerto 17 del ZPE) + reconfiguracion de red del ZPE + VRMU.
 # ==============================================================================
 
+# Acepta cualquier hostname entre "root@" y ":" (vacio, "(none)" o uno real),
+# ya que varia segun el momento del boot.
 TROSS_PROMPT = r"root@[^:\r\n]*:[^\r\n]*"
-# NOTA: el hostname entre 'root@' y ':' puede variar segun el momento del
-# boot -- vacio ("root@:~"), "(none)" si todavia no se limpio (visto en un
-# boot en frio tras un power-cycle completo del rack, antes de que corra
-# 'killall rcS'), o un hostname real mas adelante. El patron acepta
-# cualquiera de esos casos en vez de exigir el hostname vacio a secas, que
-# causaba falsos negativos (login exitoso pero no reconocido como tal).
-# NOTA IMPORTANTE: el prompt de U-Boot es la cadena "=> " sola en su propia
-# linea. El patron anterior (r"=>\s") hacia match con CUALQUIER "=>" seguido
-# de un espacio en TODO el stream, incluyendo texto de log normal como
-# "bootCount 0 => 1" (que aparece durante el boot normal de Linux, no es un
-# prompt). Eso causaba un falso positivo: el script creia haber interrumpido
-# el arranque en U-Boot cuando en realidad el Tross seguia booteando Linux
-# solo, y el resto de los comandos se enviaban "al vacio". Anclamos el patron
-# a que "=>" este al inicio de una linea Y sea lo ultimo recibido hasta el
-# momento (fin del buffer), que es como se comporta un prompt real esperando
-# input.
+
+# Ancla "=>" al inicio de linea y al final del buffer, para no confundirlo
+# con apariciones de "=>" dentro del log normal de boot (ej. "bootCount 0 => 1").
 UBOOT_PROMPT = r"\r\n=> $"
 
-# Aviso que imprime el GATEWAY de consola del ZPE (Nodegrid) cuando nuestra
-# sesion quedo en modo solo-lectura y por lo tanto CUALQUIER tecla que
-# mandemos se descarta sin llegar al Tross. La toma de control automatica
-# (Ctrl-X, t) no siempre alcanza para resolverlo -- se ha visto en hardware
-# real que, una vez que la sesion cae en este estado, la unica recuperacion
-# conocida es apagar y encender el propio ZPE.
+# Aviso del gateway de consola del ZPE (Nodegrid) cuando la sesion queda en
+# modo solo lectura: ninguna tecla enviada llega al Tross. La unica
+# recuperacion conocida en ese caso es reiniciar el propio ZPE.
 ZPE_READONLY_MARKER = "[read-only -- use ^X t ? for help]"
 
 class _ZpeConsoleReadOnlyError(RuntimeError):
-    """Se levanta cuando la consola relay del ZPE devuelve el aviso de
-    solo-lectura de forma persistente (ver ZPE_READONLY_MARKER), indicando
-    que ninguna tecla enviada esta llegando realmente al Tross. TROSS_CONFIG()
-    la captura para pedirle al operador que reinicie (apague/encienda) el
-    ZPE y reintentar la configuracion completa desde cero."""
+    """Consola del ZPE atascada en modo solo lectura. TROSS_CONFIG() la
+    captura para pedir el reinicio del ZPE y reintentar."""
     pass
 
 def _paced_sendline(child, line, delay=0.4):
-    """Envia una linea a la consola y espera un breve instante antes de que
-    el codigo continue. Es una medida adicional de robustez (evitar mandar
-    comandos pegados uno tras otro sin darle tiempo al equipo remoto de
-    procesarlos), complementaria a la correccion de fondo de esta funcion
-    (toma de control read-write + regex del prompt sin falsos positivos)."""
+    """Envia una linea a la consola con una breve pausa posterior, para no
+    saturar al equipo remoto con comandos consecutivos."""
     child.sendline(line)
     time.sleep(delay)
 
 def _print_red_banner(message):
-    """Imprime un mensaje resaltado en rojo, con borde, para alertas que
-    requieren la atencion/intervencion del operador. A diferencia de
-    print_ascii_fail() (formato fijo de una sola linea), este helper soporta
-    mensajes multilinea largos, como las instrucciones de correccion de MAC."""
+    """Imprime un mensaje de alerta en rojo con borde. A diferencia de
+    print_ascii_fail(), soporta mensajes multilinea."""
     RED = "\033[91m\033[1m"
     RESET = "\033[0m"
     border = "=" * 80
@@ -2272,8 +2228,7 @@ def _print_red_banner(message):
     print(f"{border}{RESET}\n")
 
 def _green_wait(seconds, label="Esperando"):
-    """Espera 'seconds' segundos mostrando un contador en verde, tal como
-    pide el runbook para todas las esperas largas (tftp, imager, vrmu_util)."""
+    """Espera 'seconds' segundos mostrando un contador regresivo en verde."""
     GREEN = "\033[92m"
     RESET = "\033[0m"
     print(f"[*] {label}: esperando {seconds}s...")
@@ -2289,30 +2244,21 @@ def _green_wait(seconds, label="Esperando"):
     sys.stdout.write(f"\r{GREEN}[{label}] Completado.{' ' * 20}{RESET}\n")
 
 def _update_state_config(extra):
-    """Actualiza state['config'] sin marcar ningun flag/paso como completado;
-    se usa para persistir valores intermedios (como 'tross_lease') que no
-    representan por si mismos un paso terminado del flujo."""
+    """Actualiza state['config'] sin marcar ningun paso como completado."""
     state = load_state()
     state.setdefault("config", {}).update(extra)
     save_state(state)
 
 def _mac_plus_offset(mac, offset):
-    """Suma 'offset' al ultimo octeto de una MAC (formato 'xx:xx:xx:xx:xx:xx'),
-    tal como pide el runbook para derivar la MAC del lease del Tross a partir
-    de 'tross_mac' (+2 en el ultimo octeto)."""
+    """Suma 'offset' al ultimo octeto de una MAC ('xx:xx:xx:xx:xx:xx')."""
     parts = mac.split(":")
     last = (int(parts[-1], 16) + offset) % 256
     parts[-1] = f"{last:02x}"
     return ":".join(parts)
 
 def _zpe_console_take_control(child):
-    """Los puertos de consola relay del ZPE (Nodegrid) se abren en modo
-    SOLO LECTURA por defecto: mientras el banner
-    '[read-only -- use ^X t ? for help]' este activo, CUALQUIER tecla que
-    enviemos (el spam de espacio para interrumpir el autoboot, los comandos
-    de U-Boot, el login, etc.) se descarta silenciosamente sin llegar al
-    Tross. Por eso, justo despues de conectar, hay que tomar control de
-    escritura con la secuencia Ctrl-X, t que el propio banner indica."""
+    """Toma control de escritura de un puerto de consola relay del ZPE que
+    abrio en modo solo lectura, con la secuencia Ctrl-X, t."""
     print("[*] Tomando control de escritura de la consola (Ctrl-X, t)...")
     child.send(chr(0x18))  # Ctrl-X
     time.sleep(0.3)
@@ -2320,11 +2266,9 @@ def _zpe_console_take_control(child):
     time.sleep(0.3)
 
 def _drain_buffered_output(child, idle_timeout=0.3):
-    """Descarta cualquier dato ya bufferizado en la sesion (por ejemplo, el
-    volcado de scrollback/historial que el ZPE envia de inmediato al
-    conectarse a un puerto de consola, que NO es output en vivo), leyendo de
-    forma no bloqueante hasta que no llegue nada nuevo durante 'idle_timeout'.
-    Asi arrancamos 'limpios' antes de empezar a interpretar el stream."""
+    """Descarta el scrollback ya bufferizado en la sesion (el ZPE lo vuelca
+    al conectar) leyendo en modo no bloqueante hasta que no llegue nada
+    nuevo durante 'idle_timeout'."""
     try:
         while True:
             child.read_nonblocking(size=65536, timeout=idle_timeout)
@@ -2334,28 +2278,18 @@ def _drain_buffered_output(child, idle_timeout=0.3):
         pass
 
 def _open_zpe_console_telnet(port, timeout=45, take_control=False):
-    """Abre una sesion telnet hacia el puerto serial relay del ZPE (Nodegrid),
-    usado para acceder a la consola del Tross conectado fisicamente al puerto
-    17 del ZPE (telnet 10.0.0.253 7017).
+    """Abre una sesion telnet al puerto serial relay del ZPE (Nodegrid) que
+    da acceso a la consola del Tross conectada fisicamente al puerto 17.
 
-    take_control=True manda la secuencia Ctrl-X, t (ver
-    _zpe_console_take_control) inmediatamente despues de conectar. Esto SOLO
-    debe pedirse cuando la conexion se abre justo antes de un boot en vivo
-    (la consola todavia no tiene un prompt interactivo esperando input, asi
-    que cualquier tecla de mas se pierde inofensivamente en el stream de
-    arranque). Con take_control=False (default, para reconectar a una sesion
-    que puede estar idle en un prompt real como '=>' o 'root@:'), NO se manda
-    nada a ciegas: enviar Ctrl-X/t sobre un prompt idle contamina el buffer
-    de comandos del Tross (quedaria un '=> t' pendiente en vez de '=> '),
-    rompiendo la deteccion de prompts. La toma de control reactiva (solo si
-    se detecta el aviso de solo-lectura) vive en _tross_ensure_logged_in."""
+    take_control=True manda la toma de control (Ctrl-X, t) justo despues de
+    conectar; usar solo cuando la conexion se abre antes de un boot en vivo,
+    ya que enviarla sobre un prompt idle ('=>' o 'root@:') contamina el
+    buffer de comandos del equipo. La toma de control reactiva (solo si se
+    detecta el aviso de solo lectura) vive en _tross_ensure_logged_in."""
     cmd = f"telnet 10.0.0.253 {port}"
     print(f"[CMD Interactive] {cmd}")
     child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=timeout)
     child.logfile_read = sys.stdout
-    # Esperamos a que el cliente telnet confirme la conexion antes de mandar
-    # cualquier tecla, para no perder la secuencia de toma de control en
-    # medio del handshake de conexion.
     child.expect([r"Escape character is", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
     if take_control:
         _zpe_console_take_control(child)
@@ -2363,9 +2297,8 @@ def _open_zpe_console_telnet(port, timeout=45, take_control=False):
     return child
 
 def _zpe_console_exit(child):
-    """Sale de una sesion de consola relay del ZPE (Nodegrid) con la secuencia
-    de escape Ctrl+5 seguida de 'q', tal como lo espera el runbook. Segura de
-    llamar mas de una vez sobre el mismo 'child'."""
+    """Sale de una sesion de consola relay del ZPE con Ctrl+5 seguido de 'q'.
+    Segura de llamar mas de una vez sobre el mismo 'child'."""
     if child is None or getattr(child, "closed", False):
         return
     print("[*] Saliendo de la consola relay del ZPE (Ctrl+5, q)...")
@@ -2384,16 +2317,12 @@ def _zpe_console_exit(child):
         os.system("clear")
 
 def _uboot_break_spam(child, max_seconds=180, spam_window=25):
-    """Interrumpe el arranque del Tross.
-
-    IMPORTANTE: mandar espacio a ciegas desde el inicio del arranque (DDR
-    init, deteccion de red, etc.) no logra interrumpir el autoboot -- la
-    ventana real donde U-Boot escucha el teclado es 'Hit any key to stop
-    autoboot:  N ... 0', que dura solo unos pocos segundos. Por eso esta
-    funcion primero ESPERA EN SILENCIO (sin mandar ninguna tecla) hasta LEER
-    literalmente ese mensaje, y recien en ese momento prueba varias teclas
-    "seguras" de interrupcion (ver nota abajo) durante 'spam_window'
-    segundos, maximizando las chances de capturar la ventana real."""
+    """Interrumpe el autoboot del Tross. Espera en silencio (sin enviar
+    teclas) hasta leer 'Hit any key to stop autoboot:', y recien ahi manda
+    teclas de interrupcion durante 'spam_window' segundos. Enter y espacio
+    son las unicas teclas validas: las teclas de control (Ctrl-C, Ctrl-X,
+    etc.) son interceptadas por el gateway de consola del ZPE antes de
+    llegar al equipo."""
     print("[*] Esperando (sin enviar teclas aun) el mensaje 'Hit any key to stop autoboot:' del Tross...")
     idx = child.expect([r"Hit any key to stop autoboot", pexpect.TIMEOUT, pexpect.EOF], timeout=max_seconds)
     if idx != 0:
@@ -2401,21 +2330,6 @@ def _uboot_break_spam(child, max_seconds=180, spam_window=25):
         raise RuntimeError("Timeout esperando 'Hit any key to stop autoboot:' en el Tross.")
 
     print("[✓] 'Hit any key to stop autoboot:' detectado. Probando teclas de interrupcion...")
-    # NOTA: se probaron dos aproximaciones que NO funcionaron:
-    #  - Espacio: el propio U-Boot lo recibe pero lo rechaza EXPLICITAMENTE
-    #    (imprime "ignored]") y el autoboot sigue su curso normalmente.
-    #  - Ctrl-C: nunca llega al Tross -- el GATEWAY de consola del ZPE
-    #    (Nodegrid) lo intercepta como hotkey propio y CIERRA la sesion
-    #    (imprime "disconnect]", cae a su prompt local
-    #    "[NONE@nodegrid ttyS17]#" y cierra la conexion TCP). El
-    #    "Press Ctrl-C to run Shmoo" que aparece antes en el boot es para un
-    #    paso totalmente distinto (calibracion DDR/Shmoo), no para el
-    #    autoboot. Por eso Ctrl-C (y en general cualquier tecla de control
-    #    tipo Ctrl-X/Ctrl-]/Ctrl-5) queda descartado: puede ser interceptado
-    #    por el gateway antes de llegar al equipo.
-    # Se prueban entonces teclas "normales" (no de control) durante la misma
-    # ventana: Enter primero (la alternativa mas comun para este tipo de
-    # prompt), y espacio como respaldo.
     candidate_keys = ["\r", " "]
     deadline = time.time() + spam_window
     i = 0
@@ -2433,12 +2347,6 @@ def _uboot_break_spam(child, max_seconds=180, spam_window=25):
                 "autoboot (posible tecla reservada por el gateway del ZPE)."
             )
             raise RuntimeError("EOF inesperado interrumpiendo el autoboot del Tross.")
-        # idx == 1 (TIMEOUT): revisamos si lo que se acumulo en el buffer
-        # contiene el aviso de sesion solo-lectura del gateway del ZPE. Si
-        # aparece, ninguna tecla que mandemos esta llegando de verdad al
-        # Tross -- no tiene sentido seguir intentando hasta agotar
-        # 'spam_window'. Cortamos aqui mismo con una excepcion dedicada para
-        # que TROSS_CONFIG() dispare la recuperacion (reiniciar el ZPE).
         if ZPE_READONLY_MARKER in (child.before or ""):
             print_ascii_fail(
                 "La consola del ZPE quedo en modo solo-lectura: ninguna tecla llega al Tross."
@@ -2499,17 +2407,10 @@ def _wait_for_pattern_with_enters(child, pattern, max_seconds, interval=5, label
     return False
 
 def _wait_silently_for_pattern(child, pattern, max_seconds, poll_interval=5, label="Esperando"):
-    """Como _wait_for_pattern_with_enters, pero SIN mandar ninguna tecla
-    mientras espera -- solo escucha. Es lo que corresponde despues de un
-    'reset' real que dispara la ventana 'Hit any key to stop autoboot':
-    CUALQUIER tecla enviada durante esa ventana (incluido un simple ENTER en
-    blanco) cuenta como interrupcion del autoboot y deja al Tross parado en
-    el prompt '=>' de U-Boot en vez de arrancar Linux solo. Esto es
-    exactamente lo que pasaba antes: _wait_for_pattern_with_enters mandaba un
-    ENTER a los 5 segundos de reiniciar, que caia justo en medio de esa
-    ventana y abortaba el autoboot. Muestra un contador en verde mientras
-    dura la espera. Devuelve True si aparecio el patron, False si se agoto
-    el tiempo."""
+    """Como _wait_for_pattern_with_enters, pero sin enviar ninguna tecla
+    mientras espera. Se usa tras un 'reset' real: cualquier tecla enviada
+    durante la ventana 'Hit any key to stop autoboot' interrumpiria el
+    autoboot en vez de dejarlo avanzar solo hasta 'login:'."""
     GREEN = "\033[92m"
     RESET = "\033[0m"
     elapsed = 0
@@ -2636,37 +2537,19 @@ def _tross_netboot_and_login(child):
     _tross_do_login(child)
 
 def _tross_ensure_logged_in(child):
-    """Punto de entrada comun para las etapas que necesitan al Tross
-    logueado (TROSS_PROMPT) al reconectar la consola -- ya sea por primera
-    vez en la etapa, o al RESUMIR una corrida anterior que fallo a mitad de
-    camino. Detecta en que estado quedo la sesion y hace lo minimo necesario
-    para llegar a un prompt de shell logueado:
+    """Punto de entrada comun para dejar al Tross logueado (TROSS_PROMPT) al
+    reconectar la consola, ya sea la primera vez en la etapa o al resumir
+    una corrida anterior. Detecta el estado de la sesion y hace lo minimo
+    necesario para llegar a un prompt de shell:
       - Ya esta en TROSS_PROMPT -> no hace nada.
-      - Esta en 'login:' (Linux ya booteo) -> loguea directamente.
-      - Esta en '=>' de U-Boot (nunca arranco Linux, o se reinicio) -> corre
-        el netboot completo y loguea.
-    Nota: si el '=>' aparece por una razon distinta a 'nunca booteo Linux'
-    (por ejemplo, a mitad de la etapa de guardado de bootenv), esta funcion
-    igual hace un netboot valido y logueado -- de mas esta decir que cuesta
-    un ciclo de boot extra, pero el resultado final sigue siendo correcto.
+      - Esta en 'login:' -> loguea directamente.
+      - Esta en '=>' de U-Boot -> corre el netboot completo y loguea.
+      - Esta en plena ventana 'Hit any key to stop autoboot' -> espera en
+        silencio a que el autoboot termine solo, sin interrumpirlo.
 
-    IMPORTANTE: el primer sondeo NO manda la secuencia de toma de control
-    (Ctrl-X, t) a ciegas -- mandarla sobre un prompt idle real (como '=>')
-    contamina su buffer de comandos con una 't' suelta, y eso es justamente
-    lo que rompia el sondeo en versiones anteriores. Solo se intenta la toma
-    de control, una vez, de forma REACTIVA, si el sondeo no reconoce ningun
-    estado Y se ve el aviso de solo-lectura del gateway del ZPE en el buffer;
-    si aun asi sigue sin reconocerse, se escala a _ZpeConsoleReadOnlyError
-    para que TROSS_CONFIG() dispare la recuperacion conocida (reiniciar el
-    ZPE), en vez de fallar con un error generico.
-
-    Tambien evita, por las dudas, el mismo bug que 'reset' + enviar teclas
-    a ciegas causaba en _tross_stage_bootenv: si al reconectar justo caemos
-    en medio de un reboot real (por ejemplo, resumiendo una corrida que se
-    corto justo despues de mandar 'reset'), un simple ENTER de sondeo podria
-    caer en la ventana 'Hit any key to stop autoboot' e interrumpir el
-    autoboot sin querer. Por eso se escucha primero, en silencio, un ratito
-    antes de mandar nada."""
+    Si el sondeo inicial no reconoce ningun estado y se detecta el aviso de
+    sesion solo lectura del ZPE, reintenta la toma de control una vez antes
+    de escalar a _ZpeConsoleReadOnlyError."""
     idx = child.expect([
         TROSS_PROMPT, r"login:", UBOOT_PROMPT, r"Hit any key to stop autoboot",
         pexpect.TIMEOUT, pexpect.EOF
@@ -2692,9 +2575,7 @@ def _tross_ensure_logged_in(child):
         _tross_netboot_and_login(child)
         return
 
-    # idx in (4, 5): TIMEOUT o EOF en el sondeo pasivo -- recien aca vale la
-    # pena mandar un ENTER para ver si hay un prompt esperando que no se
-    # refresco solo (fuera de la ventana de autoboot, esto es inofensivo).
+    # Sin match en el sondeo pasivo: se manda un ENTER y se vuelve a sondear.
     _paced_sendline(child, "")
     idx = child.expect([TROSS_PROMPT, r"login:", UBOOT_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=30)
     if idx == 0:
@@ -2834,23 +2715,17 @@ def _tross_reconfigure_zpe_eth1():
     print("[✓] Sesion SSH hacia el ZPE cerrada.")
 
 def TROSS_CONFIG():
-    """Configuracion automatica completa del Tross: registra su MAC en el DHCP,
-    lo bootea y flashea via consola serial (relay del puerto 17 del ZPE),
-    reconfigura la red del ZPE (ETH1 estatica), obtiene el 'lease' de red del
-    Tross a partir de las leases del ZPE, y corre el flasheo/actualizacion de
-    firmware con vrmu_util.
+    """Configuracion automatica completa del Tross: registra su MAC en el
+    DHCP, lo bootea y flashea via consola serial, reconfigura la red del
+    ZPE, detecta el lease de red del Tross y corre el flasheo/actualizacion
+    de firmware con vrmu_util (ver _tross_config_attempt para el detalle de
+    las 13 etapas).
 
-    Si la consola del ZPE queda atascada en modo solo-lectura (ver
-    ZPE_READONLY_MARKER / _ZpeConsoleReadOnlyError), la unica recuperacion
-    conocida en hardware real es reiniciar (apagar/encender) el propio ZPE.
-    Por eso esta funcion es un wrapper con reintento: ante ese error puntual,
-    sale de la consola (ya lo hace el 'finally' interno), le pide al
-    operador que reinicie fisicamente el ZPE, espera su confirmacion (ENTER),
-    da un minuto de margen para que el ZPE termine de levantar, y vuelve a
-    llamar a _tross_config_attempt(). Como cada etapa interna tiene su propia
-    bandera en provisioning_state.json, este reintento NO repite las etapas
-    ya completadas -- retoma justo en la que fallo. Cualquier otro tipo de
-    error se sigue propagando normalmente (no se reintenta a ciegas)."""
+    Si la consola del ZPE queda atascada en modo solo lectura
+    (_ZpeConsoleReadOnlyError), pide al operador que reinicie el ZPE y
+    reintenta _tross_config_attempt(): como cada etapa tiene su propia
+    bandera en tross_config.json, el reintento retoma en la etapa que
+    fallo en vez de repetir todo desde cero."""
     if is_tross_step_completed("TROSS_CONFIG"):
         print("[=] Paso 'TROSS_CONFIG' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -2912,11 +2787,8 @@ def _tross_stage_flash_uboot():
 
     child = _open_zpe_console_telnet(7017, take_control=True)
     try:
-        # Al conectar, el puerto de consola del ZPE vuelca de inmediato el
-        # SCROLLBACK del ultimo boot (no es en vivo). Por eso pedimos el
-        # reinicio fisico manual recien ahora que ya estamos conectados y con
-        # control de escritura tomado, garantizando que lo que sigue es un
-        # boot real y en vivo.
+        # El ZPE vuelca el scrollback del ultimo boot al conectar (no es en
+        # vivo), por eso se pide el reinicio fisico recien ahora.
         _print_yellow_banner(
             "Ya se establecio la conexion a la consola del Tross. Ahora reinicie "
             "FISICAMENTE el Tross de forma manual (apague y encienda, o presione "
@@ -3036,7 +2908,7 @@ def _tross_stage_download_imageset():
             is_transient_failure = any(m in tftp_output for m in TRANSIENT_FAILURE_MARKERS)
             if is_mac_mismatch:
                 _print_red_banner(
-                    "MAC del tross no coincide, porfavor corrijala en otra terminal con\n"
+                    "La MAC del Tross no coincide. Corrijala en otra terminal con:\n"
                     "\n"
                     "sudo gedit /etc/dhcp/dhcpd.conf\n"
                     "\n"
@@ -3045,25 +2917,23 @@ def _tross_stage_download_imageset():
                     "sudo systemctl restart isc-dhcp-server\n"
                     "sudo systemctl restart isc-dhcp-server6\n"
                     "\n"
-                    "y de enter para continuar..."
+                    "Presione ENTER para continuar."
                 )
                 input("Presione ENTER para continuar...")
                 continue
             if is_transient_failure:
-                # A diferencia del mismatch de MAC (rechazo inmediato y
-                # explicito del servidor), esto es un timeout: el Tross no
-                # recibio respuesta del servidor TFTP a tiempo. Se ha visto en
-                # hardware real acompañado de un corte momentaneo del link de
-                # red (eth0 Down/Up) durante la espera -- probablemente
-                # transitorio, no necesariamente un problema de configuracion.
+                # Timeout de red, no mismatch de MAC: probablemente
+                # transitorio (se ha visto acompañado de un corte breve del
+                # link durante la espera).
                 _print_red_banner(
                     "La descarga de imageset.tgz por TFTP fallo por timeout "
                     "('Retry limit exceeded' / 'server read timed out'), no por "
                     "mismatch de MAC. Puede deberse a un corte momentaneo de red.\n"
                     "\n"
                     "Verifique la conectividad de red hacia 10.0.0.254 si el problema "
-                    "persiste tras un par de reintentos, y de enter para reintentar "
-                    "la descarga..."
+                    "persiste tras varios reintentos.\n"
+                    "\n"
+                    "Presione ENTER para reintentar la descarga."
                 )
                 input("Presione ENTER para continuar...")
                 continue
@@ -3166,13 +3036,8 @@ def _tross_stage_bootenv():
 
         print("[CMD U-Boot] reset")
         _paced_sendline(child, "reset")
-        # OJO: aca NO se usa _wait_for_pattern_with_enters. Ese helper manda
-        # un ENTER cada 5s, y el primero cae justo en medio de la ventana
-        # 'Hit any key to stop autoboot' que sigue a este reset -- un ENTER
-        # en blanco CUENTA como interrupcion del autoboot y deja al Tross
-        # parado en '=>' en vez de arrancar Linux solo (bug real que se vio
-        # en hardware: el equipo quedaba repitiendo '=>' sin parar). Por eso
-        # se espera en silencio con _wait_silently_for_pattern.
+        # Espera en silencio: un ENTER durante la ventana 'Hit any key to
+        # stop autoboot' que sigue al reset interrumpiria el autoboot.
         if not _wait_silently_for_pattern(child, r"login:", max_seconds=210, poll_interval=5,
                                            label="Esperando prompt 'login:' tras reset (sin enviar teclas)"):
             print_ascii_fail("No se recibio el prompt 'login:' del Tross tras 'reset'.")
@@ -3210,11 +3075,8 @@ def _tross_stage_lease(tross_mac):
         target_mac = _mac_plus_offset(tross_mac, 2)
         print(f"[*] Buscando el lease asociado a la MAC {target_mac} (tross_mac + 2)...")
 
-        # Justo despues de reconfigurar ETH1 del ZPE (etapa anterior), el
-        # Tross todavia puede no haber renovado su lease DHCP contra la red
-        # recien reconfigurada -- el archivo de leases puede aparecer vacio
-        # las primeras veces que se lee. Se reintenta con espera (contador
-        # verde) antes de darlo por fallido.
+        # El lease puede tardar en aparecer si el Tross aun no renovo su
+        # DHCP tras la reconfiguracion de ETH1 del ZPE.
         LEASE_WAIT_MAX_SECONDS = 180
         LEASE_WAIT_POLL_SECONDS = 15
         matches = []
@@ -3258,11 +3120,8 @@ def _tross_stage_lease(tross_mac):
 
 def _tross_stage_vrmu_flash(tross_lease):
     """ETAPA 9/13: flasheo del Tross via vrmu_util (comando repetido 2
-    veces). El runbook exige esperar los 10 minutos COMPLETOS entre una
-    corrida y la siguiente, sin importar que el propio comando de vrmu_util
-    ya haya retornado antes -- el Tross sigue flasheando el firmware en
-    segundo plano durante ese tiempo, y mandar el segundo comando antes de
-    que termine podria interrumpirlo o pisar el flasheo en curso."""
+    veces, con 10 minutos de espera forzosa entre corridas, ya que el
+    flasheo sigue en curso en el Tross aunque el comando ya haya retornado)."""
     if is_tross_step_completed("tross_vrmu_flash_done"):
         print("[=] Etapa 'tross_vrmu_flash_done' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3282,10 +3141,6 @@ def _tross_stage_vrmu_flash(tross_lease):
         label="vrmu_util flash (intento 1/2)"
     )
 
-    # Espera FORZOSA de los 10 minutos completos, aunque el comando haya
-    # retornado mucho antes (se vio en hardware real que el CLI puede
-    # devolver el control en segundos, mientras el Tross sigue flasheando
-    # el firmware por su cuenta en segundo plano).
     _green_wait(600, "Esperando los 10 minutos obligatorios antes de repetir el flash")
 
     print("[*] Ejecutando vrmu_util (flash) - intento 2/2...")
@@ -3334,26 +3189,10 @@ TROSS_LEDARE_FW_VERSION = "1.8.5"
 
 def _tross_stage_vrmu_fw_version_check(tross_lease):
     """ETAPA 11/13: verifica, via vrmu_util, que la version de firmware del
-    Ledare haya quedado en la version objetivo (por defecto 'Ledare 1.8.5').
-
-    NOTA / CORRECCION: una version anterior de esta etapa validaba el
-    string_value suelto 'a'/'b' que aparece al principio de la salida de
-    'grep -a4 fw-version' (tratando 'b' como exito y 'a' como falla). Eso
-    estaba mal fundamentado: la guia oficial del equipo (tross_conf.docx,
-    paso 4.5) es explicita en que el criterio real es que el string_value
-    DENTRO del bloque 'streamz_name: "/flash/fw-version"' sea la version
-    objetivo del Ledare (ej. 'Ledare 1.8.5') -- ese primer valor suelto
-    'a'/'b' es un campo de otro streamz sin relacion directa con si el
-    upgrade funciono (en los propios ejemplos de la guia aparece 'b' tanto
-    antes como despues de un power-cycle exitoso, nunca 'a').
-
-    IMPORTANTE: igual que el flash de la etapa 9, el comando de
-    'peripheral upgrade' (etapa 10) retorna el control en segundos, pero el
-    Tross puede seguir aplicando el cambio de firmware del periferico
-    (Ledare) en SEGUNDO PLANO durante un rato mas. Por eso esta etapa no
-    falla al primer intento si todavia no ve la version objetivo: reintenta
-    con espera (contador verde) durante varios minutos antes de darlo por
-    una falla real."""
+    Ledare (bloque 'streamz_name: "/flash/fw-version"') haya quedado en la
+    version objetivo (por defecto 'Ledare 1.8.5'). Reintenta con espera, ya
+    que el cambio de firmware puede seguir aplicandose en segundo plano
+    despues de que el comando de upgrade (etapa 10) haya retornado."""
     if is_tross_step_completed("tross_vrmu_fw_version_checked"):
         print("[=] Etapa 'tross_vrmu_fw_version_checked' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3425,11 +3264,9 @@ def _tross_stage_vrmu_fw_version_check(tross_lease):
 
 def _parse_rectifier_voltages(dc_voltage_output):
     """Extrae pares (device_name, voltage) de cada bloque
-    'streamz_name: "/rectifier/dc-voltage"' en la salida de vrmu_util. El
-    valor relevante es el 'float_value' DENTRO de ese bloque (con
-    'units: "volts"'), no el campo de 'amps' que aparece justo antes por
-    como '-a4'/'-A4' engancha el contexto del bloque anterior (mismo patron
-    que ya vimos con fw-version)."""
+    'streamz_name: "/rectifier/dc-voltage"'. El valor relevante es el
+    'float_value' con 'units: "volts"' dentro de ese bloque, no el campo de
+    "amps" que el contexto de grep arrastra del bloque anterior."""
     pattern = re.compile(
         r'streamz_name:\s*"/rectifier/dc-voltage".*?device_name:\s*"([^"]*)".*?'
         r'units:\s*"volts".*?float_value:\s*([\-0-9.]+)',
@@ -3438,11 +3275,8 @@ def _parse_rectifier_voltages(dc_voltage_output):
     return [(m.group(1), float(m.group(2))) for m in pattern.finditer(dc_voltage_output)]
 
 def _ping_until_up(ip, description, max_wait_seconds=300, poll_interval=10):
-    """Hace ping a 'ip' repetidamente (con contador en verde) hasta obtener
-    respuesta o agotar 'max_wait_seconds'. Se usa para esperar a que los
-    equipos del rack (Juniper, ZPE) terminen de arrancar tras un power-cycle
-    completo del rack, antes de asumir que ya se puede seguir operando sobre
-    ellos. Devuelve True/False segun si respondio a tiempo."""
+    """Hace ping a 'ip' repetidamente hasta obtener respuesta o agotar
+    'max_wait_seconds'. Devuelve True/False segun si respondio a tiempo."""
     print(f"[*] Esperando a que {description} ({ip}) responda ping...")
     elapsed = 0
     while True:
@@ -3459,16 +3293,11 @@ def _ping_until_up(ip, description, max_wait_seconds=300, poll_interval=10):
         elapsed += poll_interval
 
 def _tross_validate_instruments_after_power_cycle():
-    """Tras el power-cycle del RACK COMPLETO (pedido por la etapa de
-    voltaje cuando la primera medicion dio baja), antes de repetir esa
-    medicion hay que confirmar que toda la cadena de equipos volvio a
-    arrancar, EN ORDEN: primero el Juniper (10.0.0.254), despues el ZPE
-    (10.0.0.253) -- ya que la consola del Tross se accede A TRAVES del ZPE,
-    no tiene sentido intentarlo antes de que el ZPE mismo responda -- y por
-    ultimo el propio Tross, validado via telnet (confirmando que booteo y
-    esta accesible, reutilizando la misma logica de deteccion de estado que
-    usan las demas etapas). Si alguno no responde a tiempo, corta con una
-    falla clara en vez de seguir a ciegas con la validacion de voltaje."""
+    """Tras un power-cycle del rack completo, confirma que la cadena de
+    equipos volvio a arrancar en orden: Juniper (10.0.0.254), ZPE
+    (10.0.0.253) -- la consola del Tross se accede a traves de el -- y por
+    ultimo el propio Tross via telnet. Corta con una falla clara si alguno
+    no responde a tiempo."""
     print("--- Validando instrumentos tras el power-cycle del rack (Juniper -> ZPE -> Tross) ---")
 
     if not _ping_until_up("10.0.0.254", "Juniper", max_wait_seconds=300, poll_interval=10):
@@ -3487,32 +3316,20 @@ def _tross_validate_instruments_after_power_cycle():
     finally:
         _zpe_console_exit(child)
 
-    # Espera forzosa de 10 minutos tras validar el booteo, para dejar que el
-    # Tross y sus perifericos (rectificadores, telemetria) terminen de
-    # estabilizarse antes de seguir con la validacion de voltaje.
     _green_wait(600, "Esperando 10 minutos tras validar el booteo del Tross (estabilizacion)")
 
     print("[✓] Validacion de instrumentos completa: Juniper, ZPE y Tross arriba.")
 
 def _measure_rectifier_voltages_with_retry(tross_lease, max_retries=3, retry_wait_seconds=300):
-    """Mide el voltaje DC de los rectificadores via vrmu_util. Si la
-    conexion falla (vrmu_util no logra conectarse al Tross -- por ejemplo
-    'Connect failed: ABORTED' / 'Telemetry request failed', algo que se vio
-    en hardware real justo despues de un power-cycle mientras el servicio de
-    telemetria del Tross todavia estaba levantando) o si TODAS las lecturas
-    dan exactamente 0, se reintenta hasta 'max_retries' veces (por defecto
-    3), con 'retry_wait_seconds' (5 minutos por defecto) de espera -- con
-    contador verde -- entre intento e intento.
+    """Mide el voltaje DC de los rectificadores via vrmu_util. Reintenta
+    hasta 'max_retries' veces (con 'retry_wait_seconds' de espera entre
+    intentos) si la conexion falla o si todas las lecturas dan 0 -- comun
+    justo despues de un power-cycle, mientras el servicio de telemetria del
+    Tross todavia esta levantando.
 
-    Si tras agotar los reintentos TODAVIA no hay ninguna lectura util,
-    recomienda al operador reiniciar la configuracion del Tross desde cero
-    y pide confirmacion explicita (y/n):
-      - 'y' -> borra tross_config.json (y su respaldo) y termina el
-        programa con una falla, dejando todo listo para arrancar de cero.
-      - cualquier otra respuesta -> deja el estado intacto (no se borra
-        nada) y termina el programa con una falla, para que el operador
-        pueda investigar manualmente o simplemente volver a correr el
-        script mas tarde sin perder el progreso ya hecho."""
+    Si se agotan los reintentos sin lecturas utiles, pregunta al operador
+    (y/n) si quiere borrar tross_config.json y reiniciar la configuracion
+    desde cero; en cualquier caso, termina el programa con una falla."""
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     home_dir = f"/home/{sudo_user}"
     dc_voltage_cmd = (
@@ -3575,40 +3392,24 @@ def _measure_rectifier_voltages_with_retry(tross_lease, max_retries=3, retry_wai
     )
 
 def _tross_stage_voltage_check(tross_lease):
-    """ETAPA 12/13: valida el voltaje DC de los rectificadores del Tross
-    (streamz '/rectifier/dc-voltage'), que debe leer por encima de 50V en
-    TODOS los rectificadores.
+    """ETAPA 12/13: valida que todos los rectificadores del Tross lean por
+    encima de 50V DC (streamz '/rectifier/dc-voltage'). La medicion en si
+    reintenta ante fallas de conexion o lecturas en 0 (ver
+    _measure_rectifier_voltages_with_retry).
 
-    La MEDICION en si tiene su propio mecanismo de reintentos ante fallas de
-    conexion o lecturas en 0 (ver _measure_rectifier_voltages_with_retry):
-    hasta 3 intentos con 5 minutos de espera entre si, y si se agotan sin
-    lecturas utiles, se le pregunta al operador (y/n) si quiere borrar
-    tross_config.json y empezar de cero.
+    Como la unica recuperacion ante un voltaje genuinamente bajo es un
+    power-cycle del rack completo -- que mataria a este mismo proceso --
+    la etapa funciona en dos fases:
 
-    Una vez que SI se obtienen lecturas utiles, esta etapa evalua el
-    voltaje en si, EN DOS FASES, porque la unica recuperacion conocida ante
-    un voltaje genuinamente bajo (no una falla de conexion, sino una
-    lectura real <=50V) es un power-cycle del RACK COMPLETO -- lo cual
-    mataria a este mismo proceso (corre en una maquina del propio rack),
-    asi que no se puede hacer de forma autonoma dentro de una sola corrida:
+    Fase 1: si algun rectificador lee <=50V, guarda la bandera
+    'tross_voltage_check_awaiting_power_cycle', pide al operador un power
+    cycle del rack completo, y termina el programa (sys.exit(0)).
 
-    FASE 1 (primera vez que se llega aca, sin la bandera
-    'tross_voltage_check_awaiting_power_cycle'): si algun rectificador lee
-    <=50V, se guarda esa bandera en tross_config.json (con el archivo ya
-    persistido a disco de forma atomica, como siempre), se le indica al
-    operador que haga un POWER CYCLE DEL RACK COMPLETO, y el programa
-    termina limpiamente (sys.exit(0)) -- no tiene sentido ni es seguro
-    seguir corriendo mientras el rack se esta por apagar.
-
-    FASE 2 (proxima corrida del script, ya con esa bandera en true): antes
-    de volver a medir, se valida que toda la cadena de equipos haya vuelto a
-    arrancar tras el power-cycle (ver _tross_validate_instruments_after_power_cycle:
-    Juniper -> ZPE -> Tross, en ese orden). Recien despues se vuelve a medir
-    el voltaje. Si esta vez todos los rectificadores leen >50V, la etapa (y
-    TROSS_CONFIG) se da por completa. Si TODAVIA no, se considera que la
-    configuracion del Tross fallo de forma irrecuperable: se borra
-    tross_config.json por completo (para forzar rehacer todo el proceso
-    desde cero en el proximo intento) y el programa termina con una falla."""
+    Fase 2 (proxima corrida, con esa bandera activa): valida primero que
+    Juniper, ZPE y Tross hayan vuelto a arrancar
+    (_tross_validate_instruments_after_power_cycle) y vuelve a medir. Si
+    ahora todos leen >50V, la etapa se completa. Si no, se considera una
+    falla irrecuperable: borra tross_config.json y termina con error."""
     if is_tross_step_completed("tross_voltage_check_done"):
         print("[=] Etapa 'tross_voltage_check_done' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3738,25 +3539,11 @@ def _tross_stage_voltage_sequence_test(tross_lease):
     mark_tross_step_completed("tross_voltage_sequence_tested")
 
 def _tross_config_attempt():
-    """Un intento completo de TROSS_CONFIG (ver esa funcion para la version
-    publica, que envuelve este intento en un retry ante sesiones de consola
-    del ZPE atascadas en solo-lectura).
-
-    Dividido en 13 etapas independientes, cada una con su propia bandera en
-    tross_config.json (tross_dhcp_applied, tross_uboot_flashed,
-    tross_linux_booted, tross_imageset_downloaded, tross_imager_done,
-    tross_bootenv_saved, tross_zpe_eth1_reconfigured, tross_lease_detected,
-    tross_vrmu_flash_done, tross_vrmu_upgrade_done,
-    tross_vrmu_fw_version_checked, tross_voltage_check_done,
-    tross_voltage_sequence_tested) -- un archivo separado de
-    provisioning_state.json, justamente para poder borrar solo este archivo
-    si hace falta rehacer todo el proceso del Tross desde cero, sin perder
-    el resto del estado del provisioning. Si el proceso se interrumpe o
-    falla a mitad de camino (por ejemplo durante los ~20 minutos del
-    imager), la proxima corrida omite las etapas ya completadas -- gracias a
-    que cada 'if is_tross_step_completed(...)' vive dentro de la etapa misma
-    -- y retoma justo en la que fallo, sin volver a flashear U-Boot ni
-    re-descargar imageset.tgz desde cero."""
+    """Ejecuta las 13 etapas de TROSS_CONFIG en orden. Cada etapa tiene su
+    propia bandera en tross_config.json -- un archivo separado de
+    provisioning_state.json para poder rehacer todo el proceso del Tross
+    borrando solo ese archivo -- por lo que una corrida interrumpida a
+    mitad de camino retoma en la etapa que fallo en vez de repetir todo."""
     print("--- PASO: TROSS_CONFIG - Configuracion automatica del Tross ---")
 
     state = load_state()
@@ -4011,12 +3798,9 @@ def end_config_reboot():
         print("\n\n[*] Se omitio el reboot recomendado. Continuando sin reiniciar...")
         return
 
-    # NOTA: aqui antes se llamaba a log_final_summary(), que CIERRA el archivo
-    # de log. Como sys.stdout/sys.stderr siguen redirigidos al DualLogger, el
-    # primer print() posterior a ese cierre lanzaba una excepcion (escritura
-    # sobre archivo cerrado) que mataba el script ANTES de llegar a ejecutar
-    # el reboot. Se reemplaza por un flush+fsync que NO cierra el archivo, y
-    # el cierre real se deja como ultimo paso, ya con el reinicio en curso.
+    # Se hace flush sin cerrar el log (sys.stdout sigue redirigido al
+    # DualLogger); el cierre definitivo queda como ultimo paso, ya con el
+    # reinicio en curso.
     print("\n\n[*] Forzando el flush del log a disco (sin cerrarlo) antes del reboot...")
     _flush_log_to_disk()
 
