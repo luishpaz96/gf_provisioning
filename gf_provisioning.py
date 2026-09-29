@@ -346,7 +346,7 @@ def mark_step_completed(step_name, extra_config=None):
 # ==============================================================================
 # ESTADO DEDICADO DE TROSS_CONFIG (tross_config.json)
 # ==============================================================================
-# Las banderas/config internas de TROSS_CONFIG (las 11 etapas + el flag final
+# Las banderas/config internas de TROSS_CONFIG (las 13 etapas + el flag final
 # 'TROSS_CONFIG' + 'tross_lease') viven en su PROPIO archivo, separado de
 # provisioning_state.json. Asi, si hace falta re-correr todo el proceso del
 # Tross desde cero, alcanza con borrar tross_config.json (sin tocar el resto
@@ -2214,7 +2214,13 @@ def tross_capture_mac():
 # (relay por el puerto 17 del ZPE) + reconfiguracion de red del ZPE + VRMU.
 # ==============================================================================
 
-TROSS_PROMPT = r"root@:[^\r\n]*"
+TROSS_PROMPT = r"root@[^:\r\n]*:[^\r\n]*"
+# NOTA: el hostname entre 'root@' y ':' puede variar segun el momento del
+# boot -- vacio ("root@:~"), "(none)" si todavia no se limpio (visto en un
+# boot en frio tras un power-cycle completo del rack, antes de que corra
+# 'killall rcS'), o un hostname real mas adelante. El patron acepta
+# cualquiera de esos casos en vez de exigir el hostname vacio a secas, que
+# causaba falsos negativos (login exitoso pero no reconocido como tal).
 # NOTA IMPORTANTE: el prompt de U-Boot es la cadena "=> " sola en su propia
 # linea. El patron anterior (r"=>\s") hacia match con CUALQUIER "=>" seguido
 # de un espacio en TODO el stream, incluyendo texto de log normal como
@@ -2867,12 +2873,12 @@ def TROSS_CONFIG():
             print("[*] Reintentando TROSS_CONFIG (retomando en la ultima etapa pendiente)...")
 
 def _tross_stage_dhcp(tross_mac):
-    """ETAPA 1/11: aplicar la MAC del Tross en /etc/dhcp/dhcpd.conf y
+    """ETAPA 1/13: aplicar la MAC del Tross en /etc/dhcp/dhcpd.conf y
     reiniciar los servicios DHCP."""
     if is_tross_step_completed("tross_dhcp_applied"):
         print("[=] Etapa 'tross_dhcp_applied' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 1/11: Aplicar la MAC del Tross en /etc/dhcp/dhcpd.conf ---")
+    print("--- ETAPA 1/13: Aplicar la MAC del Tross en /etc/dhcp/dhcpd.conf ---")
 
     print(f"[*] Asegurando que /etc/dhcp/dhcpd.conf tenga la MAC del Tross ({tross_mac})...")
     new_line = f"host tross {{ hardware ethernet {tross_mac}; fixed-address 10.0.0.251; }}"
@@ -2890,13 +2896,13 @@ def _tross_stage_dhcp(tross_mac):
     mark_tross_step_completed("tross_dhcp_applied")
 
 def _tross_stage_flash_uboot():
-    """ETAPA 2/11: conectar la consola, pedir el reinicio fisico manual del
+    """ETAPA 2/13: conectar la consola, pedir el reinicio fisico manual del
     Tross, interrumpir el autoboot, flashear U-Boot (sf probe/erase/write/
     erase) y confirmar que el equipo vuelve a quedar vivo en el prompt '=>'."""
     if is_tross_step_completed("tross_uboot_flashed"):
         print("[=] Etapa 'tross_uboot_flashed' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 2/11: Interrumpir el arranque y flashear U-Boot del Tross ---")
+    print("--- ETAPA 2/13: Interrumpir el arranque y flashear U-Boot del Tross ---")
 
     _print_yellow_banner(
         "Conecte un cable consola (TROSS) al puerto CONSOLE del TROSS y el "
@@ -2974,12 +2980,12 @@ def _tross_stage_flash_uboot():
     mark_tross_step_completed("tross_uboot_flashed")
 
 def _tross_stage_boot_linux():
-    """ETAPA 3/11: bootear Linux por red desde el '=>' de U-Boot, loguear y
+    """ETAPA 3/13: bootear Linux por red desde el '=>' de U-Boot, loguear y
     validar la version de kernel (uname -a)."""
     if is_tross_step_completed("tross_linux_booted"):
         print("[=] Etapa 'tross_linux_booted' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 3/11: Bootear Linux por red y validar el kernel ---")
+    print("--- ETAPA 3/13: Bootear Linux por red y validar el kernel ---")
 
     child = _open_zpe_console_telnet(7017)
     try:
@@ -3003,12 +3009,12 @@ def _tross_stage_boot_linux():
     mark_tross_step_completed("tross_linux_booted")
 
 def _tross_stage_download_imageset():
-    """ETAPA 4/11: descargar imageset.tgz por TFTP (con reintento ante
+    """ETAPA 4/13: descargar imageset.tgz por TFTP (con reintento ante
     mismatch de MAC o timeout transitorio de red) y validar 'ls' + 'md5sum'."""
     if is_tross_step_completed("tross_imageset_downloaded"):
         print("[=] Etapa 'tross_imageset_downloaded' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 4/11: Descargar y validar imageset.tgz por TFTP ---")
+    print("--- ETAPA 4/13: Descargar y validar imageset.tgz por TFTP ---")
 
     child = _open_zpe_console_telnet(7017)
     try:
@@ -3091,12 +3097,12 @@ def _tross_stage_download_imageset():
     mark_tross_step_completed("tross_imageset_downloaded")
 
 def _tross_stage_run_imager():
-    """ETAPA 5/11: extraer e imagear el Tross (tar + imager, ~20 minutos) y
+    """ETAPA 5/13: extraer e imagear el Tross (tar + imager, ~20 minutos) y
     validar el tail de la respuesta."""
     if is_tross_step_completed("tross_imager_done"):
         print("[=] Etapa 'tross_imager_done' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 5/11: Extraer e imagear el Tross (tar + imager, ~20 minutos) ---")
+    print("--- ETAPA 5/13: Extraer e imagear el Tross (tar + imager, ~20 minutos) ---")
 
     child = _open_zpe_console_telnet(7017)
     try:
@@ -3129,12 +3135,12 @@ def _tross_stage_run_imager():
     mark_tross_step_completed("tross_imager_done")
 
 def _tross_stage_bootenv():
-    """ETAPA 6/11: reiniciar el Tross, configurar bootcase_1/bootdelay,
+    """ETAPA 6/13: reiniciar el Tross, configurar bootcase_1/bootdelay,
     guardar el entorno (saveenv) y volver a loguear tras el reset final."""
     if is_tross_step_completed("tross_bootenv_saved"):
         print("[=] Etapa 'tross_bootenv_saved' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 6/11: Guardar bootcase_1/bootdelay y volver a loguear ---")
+    print("--- ETAPA 6/13: Guardar bootcase_1/bootdelay y volver a loguear ---")
 
     child = _open_zpe_console_telnet(7017)
     try:
@@ -3179,23 +3185,23 @@ def _tross_stage_bootenv():
     mark_tross_step_completed("tross_bootenv_saved")
 
 def _tross_stage_zpe_eth1():
-    """ETAPA 7/11: reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica)."""
+    """ETAPA 7/13: reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica)."""
     if is_tross_step_completed("tross_zpe_eth1_reconfigured"):
         print("[=] Etapa 'tross_zpe_eth1_reconfigured' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 7/11: Reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica) ---")
+    print("--- ETAPA 7/13: Reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica) ---")
 
     _tross_reconfigure_zpe_eth1()
 
     mark_tross_step_completed("tross_zpe_eth1_reconfigured")
 
 def _tross_stage_lease(tross_mac):
-    """ETAPA 8/11: reconectar la consola del Tross, detectar su 'lease' de
+    """ETAPA 8/13: reconectar la consola del Tross, detectar su 'lease' de
     red (a partir de las leases del ZPE) y validarlo con ping."""
     if is_tross_step_completed("tross_lease_detected"):
         print("[=] Etapa 'tross_lease_detected' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 8/11: Detectar el 'lease' de red del Tross y validarlo con ping ---")
+    print("--- ETAPA 8/13: Detectar el 'lease' de red del Tross y validarlo con ping ---")
 
     child = _open_zpe_console_telnet(7017)
     try:
@@ -3251,7 +3257,7 @@ def _tross_stage_lease(tross_mac):
     mark_tross_step_completed("tross_lease_detected", {"tross_lease": tross_lease})
 
 def _tross_stage_vrmu_flash(tross_lease):
-    """ETAPA 9/11: flasheo del Tross via vrmu_util (comando repetido 2
+    """ETAPA 9/13: flasheo del Tross via vrmu_util (comando repetido 2
     veces). El runbook exige esperar los 10 minutos COMPLETOS entre una
     corrida y la siguiente, sin importar que el propio comando de vrmu_util
     ya haya retornado antes -- el Tross sigue flasheando el firmware en
@@ -3260,7 +3266,7 @@ def _tross_stage_vrmu_flash(tross_lease):
     if is_tross_step_completed("tross_vrmu_flash_done"):
         print("[=] Etapa 'tross_vrmu_flash_done' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 9/11: Flasheo del Tross via vrmu_util (2 corridas, ~10 min c/u) ---")
+    print("--- ETAPA 9/13: Flasheo del Tross via vrmu_util (2 corridas, ~10 min c/u) ---")
 
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     home_dir = f"/home/{sudo_user}"
@@ -3291,11 +3297,11 @@ def _tross_stage_vrmu_flash(tross_lease):
     mark_tross_step_completed("tross_vrmu_flash_done")
 
 def _tross_stage_vrmu_upgrade(tross_lease):
-    """ETAPA 10/11: actualizacion de firmware periferico via vrmu_util."""
+    """ETAPA 10/13: actualizacion de firmware periferico via vrmu_util."""
     if is_tross_step_completed("tross_vrmu_upgrade_done"):
         print("[=] Etapa 'tross_vrmu_upgrade_done' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 10/11: Actualizacion de firmware periferico via vrmu_util ---")
+    print("--- ETAPA 10/13: Actualizacion de firmware periferico via vrmu_util ---")
 
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     home_dir = f"/home/{sudo_user}"
@@ -3324,14 +3330,34 @@ def _tross_stage_vrmu_upgrade(tross_lease):
 
     mark_tross_step_completed("tross_vrmu_upgrade_done")
 
+TROSS_LEDARE_FW_VERSION = "1.8.5"
+
 def _tross_stage_vrmu_fw_version_check(tross_lease):
-    """ETAPA 11/11: verifica, via vrmu_util, que la version de firmware haya
-    quedado en 'b' (side activo tras el upgrade). Si sigue en 'a', el
-    upgrade no tomo efecto realmente y se considera una falla."""
+    """ETAPA 11/13: verifica, via vrmu_util, que la version de firmware del
+    Ledare haya quedado en la version objetivo (por defecto 'Ledare 1.8.5').
+
+    NOTA / CORRECCION: una version anterior de esta etapa validaba el
+    string_value suelto 'a'/'b' que aparece al principio de la salida de
+    'grep -a4 fw-version' (tratando 'b' como exito y 'a' como falla). Eso
+    estaba mal fundamentado: la guia oficial del equipo (tross_conf.docx,
+    paso 4.5) es explicita en que el criterio real es que el string_value
+    DENTRO del bloque 'streamz_name: "/flash/fw-version"' sea la version
+    objetivo del Ledare (ej. 'Ledare 1.8.5') -- ese primer valor suelto
+    'a'/'b' es un campo de otro streamz sin relacion directa con si el
+    upgrade funciono (en los propios ejemplos de la guia aparece 'b' tanto
+    antes como despues de un power-cycle exitoso, nunca 'a').
+
+    IMPORTANTE: igual que el flash de la etapa 9, el comando de
+    'peripheral upgrade' (etapa 10) retorna el control en segundos, pero el
+    Tross puede seguir aplicando el cambio de firmware del periferico
+    (Ledare) en SEGUNDO PLANO durante un rato mas. Por eso esta etapa no
+    falla al primer intento si todavia no ve la version objetivo: reintenta
+    con espera (contador verde) durante varios minutos antes de darlo por
+    una falla real."""
     if is_tross_step_completed("tross_vrmu_fw_version_checked"):
         print("[=] Etapa 'tross_vrmu_fw_version_checked' ya fue ejecutada previamente. Omitiendo...")
         return
-    print("--- ETAPA 11/11: Verificar version de firmware (fw-version) ---")
+    print("--- ETAPA 11/13: Verificar version de firmware (fw-version) ---")
 
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     home_dir = f"/home/{sudo_user}"
@@ -3339,40 +3365,390 @@ def _tross_stage_vrmu_fw_version_check(tross_lease):
         f"cd {home_dir} && ./vrmu_util --hostname={tross_lease} --envelope_enabled=false "
         f"| grep -a4 fw-version"
     )
-    print("[*] Ejecutando vrmu_util para verificar fw-version...")
-    fw_output, _ = _run_local_cmd_with_wait(
-        fw_version_cmd, max_wait_seconds=120, poll_interval=5,
-        label="Verificando fw-version"
+    expected_version_string = f"Ledare {TROSS_LEDARE_FW_VERSION}"
+    flash_block_pattern = re.compile(
+        r'streamz_name:\s*"/flash/fw-version".*?string_value:\s*"([^"]*)"', re.DOTALL
     )
 
-    if 'string_value: "b"' in fw_output:
-        print('[✓] Version de firmware validada correctamente (string_value: "b").')
-    elif 'string_value: "a"' in fw_output:
-        print_ascii_fail(
-            "La version de firmware quedo en 'a' (se esperaba 'b') tras el upgrade. "
-            "Se requiere atencion del operador."
+    FW_VERSION_MAX_WAIT_SECONDS = 300
+    FW_VERSION_POLL_SECONDS = 30
+    elapsed = 0
+    fw_output = ""
+    current_version = None
+    while True:
+        print("[*] Ejecutando vrmu_util para verificar fw-version...")
+        fw_output, _ = _run_local_cmd_with_wait(
+            fw_version_cmd, max_wait_seconds=120, poll_interval=5,
+            label="Verificando fw-version"
         )
-        raise RuntimeError("Validacion de fw-version fallo: string_value quedo en 'a'.")
+
+        match = flash_block_pattern.search(fw_output)
+        current_version = match.group(1) if match else None
+
+        if current_version == expected_version_string:
+            print(f'[✓] Version de firmware del Ledare validada correctamente '
+                  f'(string_value: "{expected_version_string}").')
+            mark_tross_step_completed("tross_vrmu_fw_version_checked")
+            return
+
+        if elapsed >= FW_VERSION_MAX_WAIT_SECONDS:
+            break
+
+        if current_version:
+            print(f"[=] La version de firmware del Ledare todavia es \"{current_version}\" "
+                  f"(se espera \"{expected_version_string}\"); el Tross puede seguir aplicando "
+                  f"el cambio en segundo plano. Reintentando en {FW_VERSION_POLL_SECONDS}s "
+                  f"(maximo {FW_VERSION_MAX_WAIT_SECONDS}s)...")
+        else:
+            print(f"[!] No se encontro el bloque 'streamz_name: \"/flash/fw-version\"' en la "
+                  f"salida. Reintentando en {FW_VERSION_POLL_SECONDS}s "
+                  f"(maximo {FW_VERSION_MAX_WAIT_SECONDS}s)...")
+        _green_wait(FW_VERSION_POLL_SECONDS, "Esperando a que el Tross termine de aplicar el firmware")
+        elapsed += FW_VERSION_POLL_SECONDS
+
+    if current_version:
+        print_ascii_fail(
+            f'La version de firmware del Ledare quedo en "{current_version}" (se esperaba '
+            f'"{expected_version_string}") tras esperar varios minutos despues del upgrade. '
+            f"Se requiere atencion del operador."
+        )
+        raise RuntimeError(
+            f'Validacion de fw-version fallo: version actual "{current_version}", '
+            f'esperada "{expected_version_string}".'
+        )
     else:
         print_ascii_fail(
-            "No se pudo determinar la version de firmware (no se encontro "
-            "'string_value: \"a\"' ni 'string_value: \"b\"' en la salida de fw-version)."
+            "No se pudo encontrar el bloque 'streamz_name: \"/flash/fw-version\"' en la "
+            "salida de vrmu_util tras varios intentos."
         )
-        raise RuntimeError("Respuesta inesperada verificando fw-version.")
+        raise RuntimeError("No se pudo determinar la version de firmware del Ledare (fw-version).")
 
-    mark_tross_step_completed("tross_vrmu_fw_version_checked")
+def _parse_rectifier_voltages(dc_voltage_output):
+    """Extrae pares (device_name, voltage) de cada bloque
+    'streamz_name: "/rectifier/dc-voltage"' en la salida de vrmu_util. El
+    valor relevante es el 'float_value' DENTRO de ese bloque (con
+    'units: "volts"'), no el campo de 'amps' que aparece justo antes por
+    como '-a4'/'-A4' engancha el contexto del bloque anterior (mismo patron
+    que ya vimos con fw-version)."""
+    pattern = re.compile(
+        r'streamz_name:\s*"/rectifier/dc-voltage".*?device_name:\s*"([^"]*)".*?'
+        r'units:\s*"volts".*?float_value:\s*([\-0-9.]+)',
+        re.DOTALL
+    )
+    return [(m.group(1), float(m.group(2))) for m in pattern.finditer(dc_voltage_output)]
+
+def _ping_until_up(ip, description, max_wait_seconds=300, poll_interval=10):
+    """Hace ping a 'ip' repetidamente (con contador en verde) hasta obtener
+    respuesta o agotar 'max_wait_seconds'. Se usa para esperar a que los
+    equipos del rack (Juniper, ZPE) terminen de arrancar tras un power-cycle
+    completo del rack, antes de asumir que ya se puede seguir operando sobre
+    ellos. Devuelve True/False segun si respondio a tiempo."""
+    print(f"[*] Esperando a que {description} ({ip}) responda ping...")
+    elapsed = 0
+    while True:
+        result = subprocess.run(
+            f"ping -c 1 -W 2 {ip}", shell=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if result.returncode == 0:
+            print(f"[✓] {description} ({ip}) respondio ping.")
+            return True
+        if elapsed >= max_wait_seconds:
+            return False
+        _green_wait(poll_interval, f"Esperando ping de {description} ({ip})")
+        elapsed += poll_interval
+
+def _tross_validate_instruments_after_power_cycle():
+    """Tras el power-cycle del RACK COMPLETO (pedido por la etapa de
+    voltaje cuando la primera medicion dio baja), antes de repetir esa
+    medicion hay que confirmar que toda la cadena de equipos volvio a
+    arrancar, EN ORDEN: primero el Juniper (10.0.0.254), despues el ZPE
+    (10.0.0.253) -- ya que la consola del Tross se accede A TRAVES del ZPE,
+    no tiene sentido intentarlo antes de que el ZPE mismo responda -- y por
+    ultimo el propio Tross, validado via telnet (confirmando que booteo y
+    esta accesible, reutilizando la misma logica de deteccion de estado que
+    usan las demas etapas). Si alguno no responde a tiempo, corta con una
+    falla clara en vez de seguir a ciegas con la validacion de voltaje."""
+    print("--- Validando instrumentos tras el power-cycle del rack (Juniper -> ZPE -> Tross) ---")
+
+    if not _ping_until_up("10.0.0.254", "Juniper", max_wait_seconds=300, poll_interval=10):
+        print_ascii_fail("El Juniper (10.0.0.254) no respondio ping tras el power-cycle del rack.")
+        raise RuntimeError("Validacion de instrumentos fallo: Juniper (10.0.0.254) sin ping.")
+
+    if not _ping_until_up("10.0.0.253", "ZPE", max_wait_seconds=300, poll_interval=10):
+        print_ascii_fail("El ZPE (10.0.0.253) no respondio ping tras el power-cycle del rack.")
+        raise RuntimeError("Validacion de instrumentos fallo: ZPE (10.0.0.253) sin ping.")
+
+    print("[*] Validando que el Tross haya terminado de bootear (via telnet a traves del ZPE)...")
+    child = _open_zpe_console_telnet(7017)
+    try:
+        _tross_ensure_logged_in(child)
+        print("[✓] El Tross boot\u00f3 correctamente y esta accesible via consola.")
+    finally:
+        _zpe_console_exit(child)
+
+    # Espera forzosa de 10 minutos tras validar el booteo, para dejar que el
+    # Tross y sus perifericos (rectificadores, telemetria) terminen de
+    # estabilizarse antes de seguir con la validacion de voltaje.
+    _green_wait(600, "Esperando 10 minutos tras validar el booteo del Tross (estabilizacion)")
+
+    print("[✓] Validacion de instrumentos completa: Juniper, ZPE y Tross arriba.")
+
+def _measure_rectifier_voltages_with_retry(tross_lease, max_retries=3, retry_wait_seconds=300):
+    """Mide el voltaje DC de los rectificadores via vrmu_util. Si la
+    conexion falla (vrmu_util no logra conectarse al Tross -- por ejemplo
+    'Connect failed: ABORTED' / 'Telemetry request failed', algo que se vio
+    en hardware real justo despues de un power-cycle mientras el servicio de
+    telemetria del Tross todavia estaba levantando) o si TODAS las lecturas
+    dan exactamente 0, se reintenta hasta 'max_retries' veces (por defecto
+    3), con 'retry_wait_seconds' (5 minutos por defecto) de espera -- con
+    contador verde -- entre intento e intento.
+
+    Si tras agotar los reintentos TODAVIA no hay ninguna lectura util,
+    recomienda al operador reiniciar la configuracion del Tross desde cero
+    y pide confirmacion explicita (y/n):
+      - 'y' -> borra tross_config.json (y su respaldo) y termina el
+        programa con una falla, dejando todo listo para arrancar de cero.
+      - cualquier otra respuesta -> deja el estado intacto (no se borra
+        nada) y termina el programa con una falla, para que el operador
+        pueda investigar manualmente o simplemente volver a correr el
+        script mas tarde sin perder el progreso ya hecho."""
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    home_dir = f"/home/{sudo_user}"
+    dc_voltage_cmd = (
+        f"cd {home_dir} && ./vrmu_util --hostname={tross_lease} --envelope_enabled=false "
+        f"| grep -a4 dc-voltage"
+    )
+
+    for intento in range(1, max_retries + 1):
+        print(f"[*] Ejecutando vrmu_util para medir el voltaje DC de los rectificadores "
+              f"(intento {intento}/{max_retries})...")
+        dc_output, _ = _run_local_cmd_with_wait(
+            dc_voltage_cmd, max_wait_seconds=60, poll_interval=5,
+            label="Verificando dc-voltage"
+        )
+        readings = _parse_rectifier_voltages(dc_output)
+        all_zero = bool(readings) and all(voltage == 0 for _, voltage in readings)
+
+        if readings and not all_zero:
+            return readings
+
+        if not readings:
+            print(f"[!] No se encontro ninguna lectura de dc-voltage (intento {intento}/{max_retries}). "
+                  f"Puede que el servicio de telemetria del Tross todavia este levantando.")
+        else:
+            print(f"[!] Todas las lecturas de dc-voltage dieron 0 (intento {intento}/{max_retries}).")
+
+        if intento < max_retries:
+            _green_wait(retry_wait_seconds,
+                        f"Esperando antes del reintento {intento + 1}/{max_retries}")
+
+    _print_red_banner(
+        f"No se pudieron obtener lecturas validas de dc-voltage tras {max_retries} intentos "
+        f"(con {retry_wait_seconds // 60} minutos de espera entre cada uno).\n"
+        "\n"
+        "Se recomienda reiniciar la configuracion completa del Tross desde cero."
+    )
+    respuesta = input(
+        "¿Desea borrar el estado del Tross (tross_config.json) y empezar de nuevo? (y/n): "
+    ).strip().lower()
+
+    if respuesta == "y":
+        print(f"[*] Borrando {TROSS_STATE_FILE} (y su respaldo) para empezar de cero...")
+        for path in (TROSS_STATE_FILE, TROSS_STATE_FILE + ".bak"):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                print(f"[!] Advertencia: no se pudo borrar '{path}' automaticamente ({e}). "
+                      f"Borralo manualmente antes de reintentar.")
+        raise RuntimeError(
+            "No se obtuvieron lecturas validas de dc-voltage tras varios reintentos. Se borro "
+            "el estado del Tross (tross_config.json); hay que iniciar la configuracion del "
+            "Tross de nuevo desde cero."
+        )
+
+    raise RuntimeError(
+        "No se obtuvieron lecturas validas de dc-voltage tras varios reintentos. El estado del "
+        "Tross se dejo intacto; se puede volver a correr el script para reintentar sin perder "
+        "el progreso ya hecho."
+    )
+
+def _tross_stage_voltage_check(tross_lease):
+    """ETAPA 12/13: valida el voltaje DC de los rectificadores del Tross
+    (streamz '/rectifier/dc-voltage'), que debe leer por encima de 50V en
+    TODOS los rectificadores.
+
+    La MEDICION en si tiene su propio mecanismo de reintentos ante fallas de
+    conexion o lecturas en 0 (ver _measure_rectifier_voltages_with_retry):
+    hasta 3 intentos con 5 minutos de espera entre si, y si se agotan sin
+    lecturas utiles, se le pregunta al operador (y/n) si quiere borrar
+    tross_config.json y empezar de cero.
+
+    Una vez que SI se obtienen lecturas utiles, esta etapa evalua el
+    voltaje en si, EN DOS FASES, porque la unica recuperacion conocida ante
+    un voltaje genuinamente bajo (no una falla de conexion, sino una
+    lectura real <=50V) es un power-cycle del RACK COMPLETO -- lo cual
+    mataria a este mismo proceso (corre en una maquina del propio rack),
+    asi que no se puede hacer de forma autonoma dentro de una sola corrida:
+
+    FASE 1 (primera vez que se llega aca, sin la bandera
+    'tross_voltage_check_awaiting_power_cycle'): si algun rectificador lee
+    <=50V, se guarda esa bandera en tross_config.json (con el archivo ya
+    persistido a disco de forma atomica, como siempre), se le indica al
+    operador que haga un POWER CYCLE DEL RACK COMPLETO, y el programa
+    termina limpiamente (sys.exit(0)) -- no tiene sentido ni es seguro
+    seguir corriendo mientras el rack se esta por apagar.
+
+    FASE 2 (proxima corrida del script, ya con esa bandera en true): antes
+    de volver a medir, se valida que toda la cadena de equipos haya vuelto a
+    arrancar tras el power-cycle (ver _tross_validate_instruments_after_power_cycle:
+    Juniper -> ZPE -> Tross, en ese orden). Recien despues se vuelve a medir
+    el voltaje. Si esta vez todos los rectificadores leen >50V, la etapa (y
+    TROSS_CONFIG) se da por completa. Si TODAVIA no, se considera que la
+    configuracion del Tross fallo de forma irrecuperable: se borra
+    tross_config.json por completo (para forzar rehacer todo el proceso
+    desde cero en el proximo intento) y el programa termina con una falla."""
+    if is_tross_step_completed("tross_voltage_check_done"):
+        print("[=] Etapa 'tross_voltage_check_done' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 12/13: Validar voltaje DC de los rectificadores (dc-voltage) ---")
+
+    awaiting_power_cycle = is_tross_step_completed("tross_voltage_check_awaiting_power_cycle")
+    if awaiting_power_cycle:
+        # Ya se habia pedido el power-cycle del rack completo en una corrida
+        # anterior de esta misma etapa. Antes de repetir la medicion de
+        # voltaje, hay que confirmar que toda la cadena de equipos volvio a
+        # arrancar correctamente.
+        _tross_validate_instruments_after_power_cycle()
+
+    readings = _measure_rectifier_voltages_with_retry(tross_lease, max_retries=3, retry_wait_seconds=300)
+
+    print("[*] Lecturas de voltaje DC por rectificador:")
+    for device_name, voltage in readings:
+        marker = "✓" if voltage > 50 else "✗"
+        print(f"    [{marker}] {device_name}: {voltage} V")
+
+    all_ok = all(voltage > 50 for _, voltage in readings)
+
+    if all_ok:
+        print("[✓] Todos los rectificadores miden un voltaje DC > 50V.")
+        mark_tross_step_completed("tross_voltage_check_done")
+        return
+
+    if not awaiting_power_cycle:
+        # --- FASE 1: primera vez que vemos un voltaje bajo ---
+        mark_tross_step_completed("tross_voltage_check_awaiting_power_cycle")
+        _print_yellow_banner(
+            "Se detectaron rectificadores con voltaje DC <= 50V (se esperaba > 50V en TODOS).\n"
+            "\n"
+            "Por favor realice un POWER CYCLE DEL RACK COMPLETO (apague y encienda todo el "
+            "rack, no solo el Tross).\n"
+            "\n"
+            "Una vez que el rack haya terminado de volver a encender, vuelva a correr "
+            "gf_provisioning.py: esta validacion de voltaje se repetira automaticamente."
+        )
+        print("[*] Terminando el programa de forma segura antes del power-cycle del rack...")
+        sys.exit(0)
+
+    # --- FASE 2: ya se habia pedido un power-cycle antes, y el voltaje SIGUE bajo ---
+    print_ascii_fail(
+        "El voltaje DC de los rectificadores sigue <= 50V incluso despues del power-cycle "
+        "del rack. Se considera que la configuracion del Tross fallo de forma irrecuperable; "
+        "hay que rehacerla desde cero."
+    )
+    print(f"[*] Borrando {TROSS_STATE_FILE} (y su respaldo) para forzar rehacer todo el "
+          f"proceso del Tross desde cero en el proximo intento...")
+    for path in (TROSS_STATE_FILE, TROSS_STATE_FILE + ".bak"):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as e:
+            print(f"[!] Advertencia: no se pudo borrar '{path}' automaticamente ({e}). "
+                  f"Borralo manualmente antes de reintentar.")
+    raise RuntimeError(
+        "Validacion de voltaje DC fallo tras el power-cycle del rack. Se borro el estado del "
+        "Tross (tross_config.json); hay que iniciar la configuracion del Tross de nuevo desde cero."
+    )
+
+def _tross_stage_voltage_sequence_test(tross_lease):
+    """ETAPA 13/13: prueba funcional de los rectificadores. Baja el voltaje
+    de salida a 45V durante 15 segundos:
+
+        vrmu_util --api="/api/rectifier/outputsequence"
+                   --rectifier_output_sequence="45:100:15"
+
+    (se puede observar el LED de los Jolt100 cambiar de >50V a <50V) y
+    confirma, releyendo dc-voltage, que los rectificadores efectivamente
+    respondieron: se espera que ahora lean entre 40V y 50V (ni sigan en los
+    ~55V de operacion normal -- lo que indicaria que no reaccionaron -- ni
+    caigan a 0/sin lectura)."""
+    if is_tross_step_completed("tross_voltage_sequence_tested"):
+        print("[=] Etapa 'tross_voltage_sequence_tested' ya fue ejecutada previamente. Omitiendo...")
+        return
+    print("--- ETAPA 13/13: Prueba de secuencia de voltaje (45V/15s) en los rectificadores ---")
+
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    home_dir = f"/home/{sudo_user}"
+    sequence_cmd = (
+        f'cd {home_dir} && ./vrmu_util --hostname={tross_lease} --envelope_enabled=false '
+        f'--api="/api/rectifier/outputsequence" --rectifier_output_sequence="45:100:15" 2>&1'
+    )
+    dc_voltage_cmd = (
+        f"cd {home_dir} && ./vrmu_util --hostname={tross_lease} --envelope_enabled=false "
+        f"| grep -a4 dc-voltage"
+    )
+
+    print("[*] Enviando secuencia de voltaje (45V durante 15s) a los rectificadores...")
+    _run_local_cmd_with_wait(
+        sequence_cmd, max_wait_seconds=60, poll_interval=5,
+        label="Ejecutando outputsequence (45V/15s)"
+    )
+
+    print("[*] Verificando que el voltaje DC haya caido al rango esperado (>40V y <50V)...")
+    dc_output, _ = _run_local_cmd_with_wait(
+        dc_voltage_cmd, max_wait_seconds=60, poll_interval=5,
+        label="Verificando dc-voltage tras la secuencia"
+    )
+
+    readings = _parse_rectifier_voltages(dc_output)
+    if not readings:
+        print_ascii_fail(
+            "No se encontro ninguna lectura de dc-voltage tras la secuencia de prueba."
+        )
+        raise RuntimeError(
+            "No se pudieron obtener lecturas de dc-voltage tras la secuencia de voltaje."
+        )
+
+    print("[*] Lecturas de voltaje DC tras la secuencia:")
+    for device_name, voltage in readings:
+        marker = "✓" if 40 < voltage < 50 else "✗"
+        print(f"    [{marker}] {device_name}: {voltage} V")
+
+    all_in_range = all(40 < voltage < 50 for _, voltage in readings)
+    if not all_in_range:
+        print_ascii_fail(
+            "No todos los rectificadores cayeron al rango esperado (>40V y <50V) tras la "
+            "secuencia de prueba. Se requiere atencion del operador."
+        )
+        raise RuntimeError("La prueba de secuencia de voltaje (45V/15s) fallo.")
+
+    print("[✓] Todos los rectificadores respondieron correctamente a la secuencia de voltaje "
+          "(quedaron entre 40V y 50V).")
+    mark_tross_step_completed("tross_voltage_sequence_tested")
 
 def _tross_config_attempt():
     """Un intento completo de TROSS_CONFIG (ver esa funcion para la version
     publica, que envuelve este intento en un retry ante sesiones de consola
     del ZPE atascadas en solo-lectura).
 
-    Dividido en 11 etapas independientes, cada una con su propia bandera en
+    Dividido en 13 etapas independientes, cada una con su propia bandera en
     tross_config.json (tross_dhcp_applied, tross_uboot_flashed,
     tross_linux_booted, tross_imageset_downloaded, tross_imager_done,
     tross_bootenv_saved, tross_zpe_eth1_reconfigured, tross_lease_detected,
     tross_vrmu_flash_done, tross_vrmu_upgrade_done,
-    tross_vrmu_fw_version_checked) -- un archivo separado de
+    tross_vrmu_fw_version_checked, tross_voltage_check_done,
+    tross_voltage_sequence_tested) -- un archivo separado de
     provisioning_state.json, justamente para poder borrar solo este archivo
     si hace falta rehacer todo el proceso del Tross desde cero, sin perder
     el resto del estado del provisioning. Si el proceso se interrumpe o
@@ -3409,6 +3785,8 @@ def _tross_config_attempt():
     _tross_stage_vrmu_flash(tross_lease)
     _tross_stage_vrmu_upgrade(tross_lease)
     _tross_stage_vrmu_fw_version_check(tross_lease)
+    _tross_stage_voltage_check(tross_lease)
+    _tross_stage_voltage_sequence_test(tross_lease)
 
     _print_green_banner("CONFIGURACION DEL TROSS (TROSS_CONFIG) COMPLETADA EXITOSAMENTE.")
     mark_tross_step_completed("TROSS_CONFIG")
@@ -3599,20 +3977,39 @@ def end_config_reboot():
 
     mark_step_completed("end_config_reboot")
 
-    timeout = 60
-    print(f"El sistema se reiniciara automaticamente en {timeout} segundos.")
-    print("Presiona [ENTER] para reiniciar inmediatamente...")
+    # El reboot ahora es OPCIONAL: se recomienda, pero el operador puede
+    # elegir saltarlo (por ejemplo para seguir directo con la configuracion
+    # de Juniper/ZPE/Tross en la misma corrida, sin cortar el proceso). Se
+    # da una ventana de 5 minutos: si se presiona ENTER durante ese tiempo,
+    # se OMITE el reboot y el script continua normalmente; si se agotan los
+    # 5 minutos sin input, se procede con el reboot recomendado (comportamiento
+    # por defecto, para no dejar el rack en un estado a medio configurar por
+    # un operador que se distrajo).
+    timeout = 300
+    print(f"\nSe RECOMIENDA reiniciar el sistema ahora antes de continuar.")
+    print(f"El sistema se reiniciara automaticamente en {timeout // 60} minutos si no se hace nada.")
+    print("Presiona [ENTER] en cualquier momento para CONTINUAR SIN REINICIAR...")
 
     start_wait = time.time()
+    skip_reboot = False
     while (time.time() - start_wait) < timeout:
         remaining = int(timeout - (time.time() - start_wait))
-        sys.stdout.write(f"\rReiniciando en {remaining}s... (Presiona ENTER para adelantar): ")
+        mins, secs = divmod(remaining, 60)
+        sys.stdout.write(
+            f"\rReinicio recomendado en {mins}m {secs:02d}s... "
+            f"(Presiona ENTER para continuar SIN reiniciar): "
+        )
         sys.stdout.flush()
 
         rlist, _, _ = select.select([sys.stdin], [], [], 1.0)
         if rlist:
             sys.stdin.readline()
+            skip_reboot = True
             break
+
+    if skip_reboot:
+        print("\n\n[*] Se omitio el reboot recomendado. Continuando sin reiniciar...")
+        return
 
     # NOTA: aqui antes se llamaba a log_final_summary(), que CIERRA el archivo
     # de log. Como sys.stdout/sys.stderr siguen redirigidos al DualLogger, el
@@ -3650,11 +4047,11 @@ if __name__ == "__main__":
     reinstall_goss()
     run_final_abmx_config()
     create_networkmanager_symlink()
+    download_python_tools()
+    fix_chrome()
+    end_config_reboot()
     juniper_config()
     zpe_config()
     vrmu_util_config()
     tross_capture_mac()
     TROSS_CONFIG()
-    download_python_tools()
-    fix_chrome()
-    end_config_reboot()
