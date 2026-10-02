@@ -12,14 +12,10 @@ import atexit
 import uuid
 import getpass
 
-# ==============================================================================
-# CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
-# ==============================================================================
 START_TIME = time.time()
 LOG_FILE_PATH = f"provisioning_execution_{time.strftime('%Y%m%d_%H%M%S')}.log"
 
 class DualLogger:
-    """Duplica la salida estándar (stdout) y de error (stderr) hacia la terminal y un archivo de log."""
     def __init__(self, filepath):
         self.terminal = sys.stdout
         self.logfile = open(filepath, "a", encoding="utf-8")
@@ -38,16 +34,14 @@ class DualLogger:
     def close(self):
         if self.logfile and not self.logfile.closed:
             self.logfile.flush()
-            os.fsync(self.logfile.fileno())  # Fuerza la escritura física en disco
+            os.fsync(self.logfile.fileno())
             self.logfile.close()
 
-# Redireccionamos stdout y stderr desde el inicio
 logger_instance = DualLogger(LOG_FILE_PATH)
 sys.stdout = logger_instance
 sys.stderr = logger_instance
 
 def log_final_summary():
-    """Calcula el tiempo transcurrido y escribe el resumen final en el log antes de salir o reiniciar."""
     elapsed_seconds = int(time.time() - START_TIME)
     minutes, seconds = divmod(elapsed_seconds, 60)
     time_str = f"{minutes} min {seconds} s" if minutes > 0 else f"{seconds} s"
@@ -62,18 +56,9 @@ def log_final_summary():
     print(summary)
     logger_instance.close()
 
-# Garantiza que el resumen y cierre de archivo se ejecuten siempre (falle o termine normal)
 atexit.register(log_final_summary)
 
-# ==============================================================================
-# VARIABLES GLOBALES
-# ==============================================================================
 STATE_FILE = "provisioning_state.json"
-# SUDO_PASSWORD y MIRROR_PASSWORD ya NO viven aqui como texto plano.
-# Se piden interactivamente (una sola vez) en ensure_credentials() y se
-# guardan en STATE_FILE; estas variables globales se llenan en tiempo de
-# ejecucion antes de que cualquier otra funcion las use. VAULT_PASSWORD
-# se queda hardcodeada aqui por decision explicita.
 SUDO_PASSWORD = None
 MIRROR_PASSWORD = None
 VAULT_PASSWORD = r"/!X6i8n0+cxK$v3m4tQ-"
@@ -226,10 +211,6 @@ fixed-address6 fd00::1F;
 # END ANSIBLE MANAGED BLOCK"""
 
 def print_ascii_fail(message="Se detecto un error durante la ejecucion."):
-    """Banner compacto de FALLO (rojo). 'message' describe que fallo
-    especificamente -- esta funcion se usa desde muchos pasos distintos
-    del script (no solo Ansible), asi que el mensaje debe ser generico
-    por default y cada llamada puede pasar contexto especifico."""
     red = "\033[91m\033[1m"
     reset = "\033[0m"
     width = 66
@@ -241,9 +222,6 @@ def print_ascii_fail(message="Se detecto un error durante la ejecucion."):
     print(f"{red}└{'─' * width}┘{reset}\n")
 
 def print_ascii_pass(message="Mirror de apt + Ansible Playbook: OK."):
-    """Banner compacto de EXITO (verde). Se usa tras confirmar que tanto
-    el pre-flight de apt/mirror como el ansible-playbook terminaron sin
-    tareas fallidas."""
     green = "\033[92m\033[1m"
     reset = "\033[0m"
     width = 66
@@ -256,7 +234,6 @@ def print_ascii_pass(message="Mirror de apt + Ansible Playbook: OK."):
 _state_perms_fixed = False
 
 def fix_state_file_permissions():
-    """Corrige el ownership de STATE_FILE una sola vez por ejecucion."""
     global _state_perms_fixed
     if _state_perms_fixed:
         return
@@ -266,11 +243,6 @@ def fix_state_file_permissions():
         _state_perms_fixed = True
 
 def _atomic_write_json(filepath, data):
-    """Escribe 'data' como JSON de forma atomica: primero a un archivo
-    temporal, luego reemplaza el destino con os.replace() (atomico en
-    POSIX), evitando dejar el archivo truncado si el proceso se interrumpe
-    a mitad de la escritura. Deja ademas un respaldo '<filepath>.bak' del
-    contenido previo."""
     if os.path.exists(filepath):
         try:
             shutil.copyfile(filepath, filepath + ".bak")
@@ -284,9 +256,6 @@ def _atomic_write_json(filepath, data):
     os.replace(tmp_path, filepath)
 
 def _load_json_state(filepath):
-    """Carga el JSON de 'filepath'. Si esta corrupto, intenta recuperarlo
-    desde '<filepath>.bak'; si tampoco es posible, falla con un mensaje
-    claro en vez de propagar el JSONDecodeError."""
     if not os.path.exists(filepath):
         return {"flags": {}, "config": {}}
     try:
@@ -331,19 +300,10 @@ def mark_step_completed(step_name, extra_config=None):
     save_state(state)
     print(f"[✓] Paso '{step_name}' completado y registrado en {STATE_FILE}.")
 
-# ==============================================================================
-# ESTADO DEDICADO DE TROSS_CONFIG (tross_config.json)
-# ==============================================================================
-# Las banderas y config de las 13 etapas de TROSS_CONFIG viven en su propio
-# archivo, separado de provisioning_state.json: para rehacer el proceso del
-# Tross desde cero alcanza con borrar tross_config.json, sin afectar el
-# resto del estado del provisioning. 'tross_mac' sigue en el state file
-# principal, ya que es un dato de entrada, no un progreso de este proceso.
 TROSS_STATE_FILE = "tross_config.json"
 _tross_state_perms_fixed = False
 
 def fix_tross_state_file_permissions():
-    """Analogo a fix_state_file_permissions() pero para TROSS_STATE_FILE."""
     global _tross_state_perms_fixed
     if _tross_state_perms_fixed:
         return
@@ -374,9 +334,6 @@ def mark_tross_step_completed(step_name, extra_config=None):
     print(f"[✓] Paso '{step_name}' completado y registrado en {TROSS_STATE_FILE}.")
 
 def _prompt_password_twice(label):
-    """Pide una contraseña dos veces (input oculto via getpass) hasta que
-    ambas coincidan y no esten vacias. Se usa para no dejar contrasenas
-    hardcodeadas en el codigo fuente."""
     while True:
         p1 = getpass.getpass(f"Ingresa la contraseña de {label}: ")
         if not p1:
@@ -389,17 +346,6 @@ def _prompt_password_twice(label):
         return p1
 
 def ensure_credentials():
-    """Se llama SIEMPRE como lo primero al arrancar el script (antes de
-    _activate_sudo() y de cualquier otro paso). La primera vez que se
-    corre el script en un equipo, pide interactivamente la contrasena de
-    sudo y la del usuario 'testusr' en el Git-Mirror, cada una dos veces
-    para validar que coincidan, y las guarda en STATE_FILE. En corridas
-    posteriores (o tras un reinicio a mitad del provisioning) las lee
-    directo del state file sin volver a preguntar.
-
-    VAULT_PASSWORD se queda hardcodeada en el codigo por decision
-    explicita -- esta funcion no la toca.
-    """
     global SUDO_PASSWORD, MIRROR_PASSWORD
 
     state = load_state()
@@ -427,17 +373,11 @@ def ensure_credentials():
     }
     save_state(state)
 
-    # El state file ahora contiene contrasenas en texto plano: restringimos
-    # su lectura al dueno del archivo como mitigacion minima.
     subprocess.run(f"sudo chmod 600 {STATE_FILE}", shell=True, check=False)
 
     print(f"[✓] Credenciales guardadas en {STATE_FILE} (permisos restringidos a 600).\n")
 
 def _activate_sudo():
-    """Activa (o refresca) las credenciales de sudo en cache de forma NO
-    interactiva, usando SUDO_PASSWORD via 'sudo -S -v'. Se llama solo en
-    puntos puntuales del flujo (inicio del programa, tras el ansible local,
-    y tras salir del mirror), no de forma continua."""
     try:
         res = subprocess.run(
             f'echo "{SUDO_PASSWORD}" | sudo -S -v',
@@ -458,9 +398,6 @@ def run_command(cmd, check=True):
     print(f"[CMD] {cmd}")
     res = subprocess.run(cmd, shell=True, stderr=subprocess.PIPE, text=True)
     if res.stderr:
-        # El stdout del comando sigue heredando la terminal en vivo (como antes);
-        # el stderr lo capturamos para poder reportarlo si el comando falla, y lo
-        # reflejamos aqui para no perder warnings aunque el comando no falle.
         sys.stderr.write(res.stderr)
     if check and res.returncode != 0:
         err_detail = res.stderr.strip() if res.stderr else "(sin salida en stderr)"
@@ -494,10 +431,6 @@ def run_interactive(cmd, timeout=3600):
     return child.exitstatus
 
 def _retry_download(fn, description, max_retries=3, base_delay=10):
-    """Reintenta con backoff exponencial una operacion de descarga/red
-    (SCP, wget, etc.) que puede fallar de forma transitoria. 'fn' es un
-    callable sin argumentos (usar lambda o functools.partial) que debe
-    levantar una excepcion si la descarga fallo."""
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -616,8 +549,6 @@ def _run_scp_from_mirror_once(remote_path, local_destination):
         raise RuntimeError(f"Error transfiriendo {remote_path} desde el Git Mirror.")
 
 def run_scp_from_mirror(remote_path, local_destination):
-    """Wrapper con reintentos (backoff exponencial) sobre la copia SCP real,
-    para tolerar caidas transitorias de red hacia el Git-Mirror."""
     _retry_download(
         lambda: _run_scp_from_mirror_once(remote_path, local_destination),
         f"SCP de {remote_path} desde el Git-Mirror"
@@ -794,10 +725,6 @@ def setup_nomachine_yaml():
     print(f"[✓] Archivo {yaml_path} actualizado exitosamente.")
     mark_step_completed("setup_nomachine_yaml", {"nomachine_url": nomachine_url})
 
-# Mirrors candidatos a probar, en orden. El primero es el que ya usaba el
-# sistema; el resto son mirrors publicos alternativos y confiables para
-# Ubuntu 22.04 (jammy). Si tu org tiene un mirror interno/propio, ponlo
-# primero en esta lista.
 APT_CANDIDATE_MIRRORS = [
     "http://us.archive.ubuntu.com/ubuntu/",
     "http://archive.ubuntu.com/ubuntu/",
@@ -811,8 +738,6 @@ APT_SOURCES_BACKUP = "/etc/apt/sources.list.bak-provisioning"
 
 
 def _probe_mirror(mirror_url, connect_timeout=15):
-    """HEAD request rapido para saber si el mirror responde antes de
-    perder tiempo reescribiendo sources.list y corriendo apt."""
     probe = subprocess.run(
         f'curl -s -o /dev/null -w "%{{http_code}}" --max-time {connect_timeout} {mirror_url}',
         shell=True, capture_output=True, text=True
@@ -832,10 +757,6 @@ def _restore_sources_list():
 
 
 def _point_sources_list_to_mirror(mirror_url):
-    """Reemplaza cualquier host de archive.ubuntu.com en sources.list por
-    el mirror dado, para que cualquier llamada posterior a apt (incluida
-    la de Ansible, que lee el mismo sources.list) use el mismo mirror que
-    ya comprobamos que funciona."""
     sed_cmd = (
         r"sudo sed -i -E "
         r"'s#https?://[a-zA-Z0-9.-]+/ubuntu/#" + mirror_url.replace("/", r"\/") + r"#g' "
@@ -846,20 +767,6 @@ def _point_sources_list_to_mirror(mirror_url):
 
 def _apt_with_mirror_fallback(apt_command, description, max_retries_per_mirror=2,
                                base_delay=10, connect_timeout=15):
-    """Nucleo generico de 'ejecutar un comando de apt probando varios mirrors
-    con reintentos'. Usado tanto por apt_update()/apt_install() (para
-    cualquier paso del script que necesite instalar paquetes) como por
-    ensure_apt_mirror_ready() (el pre-flight especifico del dist-upgrade
-    antes de Ansible).
-
-    Siempre corre 'apt-get update' primero contra el mirror que se este
-    probando, y luego 'apt_command'. Si cualquiera de los dos falla, se
-    reintenta (backoff exponencial) y, si se agotan los reintentos, se
-    prueba el siguiente mirror de APT_CANDIDATE_MIRRORS.
-
-    Devuelve el mirror_url que funciono. Lanza RuntimeError si todos los
-    mirrors fallan (y en ese caso restaura el sources.list original).
-    """
     _backup_sources_list_once()
 
     for mirror_url in APT_CANDIDATE_MIRRORS:
@@ -907,31 +814,16 @@ def _apt_with_mirror_fallback(apt_command, description, max_retries_per_mirror=2
 
 
 def apt_update():
-    """'apt-get update' con fallback automatico entre mirrors. Usar SIEMPRE
-    en vez de 'run_interactive(\"sudo apt update\")' / 'sudo apt-get update'
-    sueltos, para que un mirror caido no tumbe el paso completo."""
     return _apt_with_mirror_fallback("true", "apt-get update")
 
 
 def apt_install(pkgs, update=True):
-    """Instala uno o mas paquetes con fallback automatico entre mirrors y
-    reintentos. 'pkgs' puede ser un string ('git curl') o una lista
-    (['git', 'curl']). Usar SIEMPRE en vez de 'run_interactive(\"sudo apt
-    install -y ...\")' suelto en cualquier paso del script.
-
-    Con update=True (default) corre 'apt-get update' contra el mismo
-    mirror antes de instalar, en la misma pasada (necesario, por ejemplo,
-    justo despues de agregar un repo nuevo como el de Chrome).
-    """
     pkgs_str = pkgs if isinstance(pkgs, str) else " ".join(pkgs)
     install_cmd = f"sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {pkgs_str}"
 
     if update:
         return _apt_with_mirror_fallback(install_cmd, f"apt-get install -y {pkgs_str}")
 
-    # Sin update explicito: solo probamos el mirror ya configurado (el que
-    # haya quedado de una llamada previa a apt_update()/apt_install()) y
-    # corremos el install directo, con reintentos simples.
     for attempt in range(1, 3):
         res = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
         if res.returncode == 0:
@@ -944,21 +836,6 @@ def apt_install(pkgs, update=True):
 
 
 def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_timeout=15):
-    """Pre-flight ANTES de correr el playbook de Ansible.
-
-    El playbook incluye una tarea de 'apt-get dist-upgrade' contra el
-    mirror de Ubuntu configurado. Ese mirror a veces devuelve 403 Forbidden
-    o corta la conexion (connection reset) de forma transitoria, lo cual
-    tumba la tarea de Ansible (que solo tiene 1 intento) y con ella todo
-    el Paso 8.
-
-    Corre el dist-upgrade DE VERDAD, aqui, en Python, antes de invocar
-    Ansible, probando mirrors alternos si el actual falla (ver
-    _apt_with_mirror_fallback). Si tiene exito, el sistema queda ya
-    actualizado y cuando Ansible llegue a su propia tarea de
-    'apt-get dist-upgrade' no habra nada pendiente que descargar (o sera
-    minimo), usando el mismo mirror ya validado.
-    """
     _apt_with_mirror_fallback(
         "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y",
         "apt-get dist-upgrade -y",
@@ -968,6 +845,25 @@ def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_tim
     )
     return True
 
+
+def ensure_dhcp():
+    if is_step_completed("ensure_dhcp"):
+        print("[=] Paso 'ensure_dhcp' ya fue ejecutado previamente. Omitiendo...")
+        return
+    print("--- PASO: Asegurar configuracion de DHCP ---")
+
+    _scp_download("testusr", "172.24.125.136", "/etc/dhcp/dhcpd.conf", ".")
+    _scp_download("testusr", "172.24.125.136", "/etc/dhcp/dhcpd6.conf", ".")
+
+    _run_shell_sequence([
+        "sudo mv dhcpd.conf /etc/dhcp/",
+        "sudo mv dhcpd6.conf /etc/dhcp/",
+        "sudo systemctl restart isc-dhcp-server",
+        "sudo systemctl restart isc-dhcp-server6",
+    ])
+
+    print("[✓] Configuracion de DHCP actualizada y servicios reiniciados.")
+    mark_step_completed("ensure_dhcp")
 
 def run_ansible_playbook():
     if is_step_completed("run_ansible_playbook"):
@@ -1108,10 +1004,6 @@ def provisional_dhcp():
     mark_step_completed("provisional_dhcp")
 
 def reinstall_goss():
-    """Limpia binarios/archivos previos de Goss y lo reinstala de forma
-    automatizada via el script oficial de goss.rocks. Es un paso independiente
-    del testplan (con su propio estado en el JSON) que corre justo antes de
-    run_final_abmx_config()."""
     if is_step_completed("reinstall_goss"):
         print("[=] Paso 'reinstall_goss' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -1344,14 +1236,6 @@ network:
     mark_step_completed("network_plan")
 
 def force_test_network_selection():
-    """Fuerza que la conexion 'Test Network' quede activa y priorizada en la interfaz ens4f0.
-
-    A diferencia del resto de los pasos del script, este NO se omite aunque ya
-    se haya ejecutado en una corrida anterior: cada vez que se abre
-    gf_provisioning.py (posterior al run final de ABMX) hay que verificar que
-    'Test Network' siga seleccionada, y volver a seleccionarla si no lo esta.
-    Por eso no hay 'if is_step_completed(...): return' aqui; mark_step_completed()
-    se sigue llamando al final solo para fines de registro/reporte."""
 
     print("--- PASO: Forzar seleccion de 'Test Network' en Ethernet (ens4f0) ---")
 
@@ -1424,7 +1308,6 @@ def force_test_network_selection():
     mark_step_completed("force_test_network_selection")
 
 def _print_yellow_banner(message):
-    """Imprime un mensaje resaltado en amarillo, con borde, para instrucciones manuales."""
     YELLOW = "\033[93m\033[1m"
     RESET = "\033[0m"
     border = "=" * 80
@@ -1433,7 +1316,6 @@ def _print_yellow_banner(message):
     print(f"{border}{RESET}\n")
 
 def _print_green_banner(message):
-    """Imprime un mensaje resaltado en verde, con borde, para confirmar exito o estado."""
     GREEN = "\033[92m\033[1m"
     RESET = "\033[0m"
     border = "=" * 80
@@ -1442,8 +1324,6 @@ def _print_green_banner(message):
     print(f"{border}{RESET}\n")
 
 def _try_minicom_connect(device, baud):
-    """Intenta abrir una sesion minicom sobre 'device' a la velocidad 'baud'.
-    Devuelve el objeto pexpect.spawn conectado si tuvo exito, o None si fallo."""
     cmd = f"sudo minicom -D {device} -b {baud}"
     print(f"[CMD Interactive] {cmd}")
     c = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=30)
@@ -1477,9 +1357,6 @@ def _try_minicom_connect(device, baud):
         return None
 
 def _wait_for_console_connection(banner_message, devices, baud):
-    """Cicla mostrando 'banner_message' en amarillo hasta detectar el cable de
-    consola conectado (dispositivo serial presente) y establecer una sesion
-    minicom valida sobre alguno de los 'devices'. No retorna hasta lograrlo."""
     while True:
         available = [d for d in devices if os.path.exists(d)]
 
@@ -1499,11 +1376,6 @@ def _wait_for_console_connection(banner_message, devices, baud):
         time.sleep(3)
 
 def _wait_for_console_connection_enter(banner_message, devices, baud):
-    """Igual que '_wait_for_console_connection', pero en vez de sondear solo,
-    exige que el usuario presione ENTER antes de cada intento de deteccion.
-    Muestra 'banner_message', espera ENTER y valida el cable de consola; si
-    no se detecta (o no se logra abrir minicom), vuelve a mostrar el banner
-    y a esperar ENTER, repitiendo hasta lograr una conexion valida."""
     while True:
         _print_yellow_banner(banner_message)
         input("Conecte el cable de consola y presione ENTER para continuar...")
@@ -1523,15 +1395,11 @@ def _wait_for_console_connection_enter(banner_message, devices, baud):
         print("[!] Se detecto el dispositivo pero no se pudo abrir minicom. Intente nuevamente.")
 
 def _minicom_exit(child):
-    """Sale de una sesion minicom con Ctrl+A, X, confirmando el dialogo
-    'Leave Minicom?' con ENTER (la opcion 'Yes' viene resaltada por defecto).
-    Es seguro llamarla mas de una vez sobre el mismo 'child': si la sesion
-    ya esta cerrada, no hace nada (evita el error 'Bad file descriptor')."""
     if child is None or getattr(child, "closed", False):
         return
     print("[*] Saliendo de minicom (Ctrl+A, X)...")
     try:
-        child.send(chr(1))  # Ctrl+A
+        child.send(chr(1))
         time.sleep(0.5)
         child.send("x")
         idx = child.expect(
@@ -1539,7 +1407,7 @@ def _minicom_exit(child):
             timeout=15
         )
         if idx == 0:
-            child.sendline("")  # "Yes" viene resaltado por defecto, Enter confirma
+            child.sendline("")
     except Exception as e:
         print(f"[!] Advertencia: no se pudo confirmar la salida limpia de minicom ({e}).")
     finally:
@@ -1547,17 +1415,9 @@ def _minicom_exit(child):
             child.close(force=True)
         except Exception:
             pass
-        # Cada vez que salimos de una consola minicom (ZPE, Juniper) se limpia
-        # la terminal, para no dejar mezclado el output de la sesion serial
-        # con lo que sigue imprimiendo el script.
         os.system("clear")
 
 def _juniper_expect_or_fail(child, patterns, timeout, error_msg):
-    """Helper para juniper_config(): hace expect() sobre 'patterns' y agrega
-    pexpect.TIMEOUT y pexpect.EOF automaticamente como ultimas opciones.
-    Si cae en TIMEOUT/EOF, imprime el banner de fallo y lanza RuntimeError.
-    NO cierra minicom aqui: el 'finally' de juniper_config() se encarga de
-    eso una sola vez, para evitar cierres duplicados sobre el mismo child."""
     full_patterns = list(patterns) + [pexpect.TIMEOUT, pexpect.EOF]
     idx = child.expect(full_patterns, timeout=timeout)
     if idx >= len(patterns):
@@ -1577,15 +1437,11 @@ def juniper_config():
         "y el otro extremo a un puerto USB 3.0 del Superlogics/ABMX."
     )
 
-    # --- PASO A: Exigir ENTER del usuario y validar el cable de consola antes de continuar ---
     child, used_device = _wait_for_console_connection_enter(mensaje, ["/dev/ttyUSB0", "/dev/ttyUSB1"], 9600)
     child.logfile_read = sys.stdout
 
     try:
-        # Los patrones no se anclan al final de linea: minicom refresca su
-        # barra de estado periodicamente, lo que rompe un anclaje estricto.
 
-        # --- PASO B: Login ---
         print("[*] Buscando prompt de login del Juniper...")
         child.sendline("")
         idx = _juniper_expect_or_fail(
@@ -1599,10 +1455,6 @@ def juniper_config():
             print("[*] Prompt 'login:' detectado. Ingresando usuario 'root'...")
             child.sendline("root")
 
-            # --- Verificar si el Juniper pide password tras el usuario 'root' ---
-            # Si aparece 'Password:', significa que el equipo ya tiene una
-            # contrasena de root configurada, es decir, ya fue provisionado
-            # previamente: se omite el resto de la configuracion.
             print("[*] Validando version de JUNOS...")
             idx_auth = child.expect([
                 r"Password:",
@@ -1630,21 +1482,18 @@ def juniper_config():
                     "No se detecto ni el prompt 'Password:' ni la version esperada de "
                     "JUNOS tras ingresar el usuario 'root'."
                 )
-            # idx_auth == 1: version de JUNOS detectada directamente, se continua abajo.
         else:
             print("[=] La sesion ya se encontraba autenticada en el Juniper.")
 
-            # --- PASO C: Validar version de JUNOS ---
             print("[*] Validando version de JUNOS...")
             idx_auth = child.expect([
                 r"JUNOS 20\.2R2\.11 Kernel 64-bit FLEX JNPR-11\.0",
                 pexpect.TIMEOUT,
                 pexpect.EOF
             ], timeout=20)
-            idx_auth = 1 if idx_auth == 0 else idx_auth + 1  # normalizar al mismo indice que la rama de arriba
+            idx_auth = 1 if idx_auth == 0 else idx_auth + 1
 
         if idx_auth != 1:
-            # --- Version incorrecta: instruir downgrade manual y cerrar el programa ---
             RED = "\033[91m\033[1m"
             RESET = "\033[0m"
             print(f"\n{RED}Version JUNIPER Incorrecta!!! Realizar Downgrade de Juniper...{RESET}\n")
@@ -1668,11 +1517,10 @@ def juniper_config():
 
             print_ascii_fail()
             print("[!] Cerrando gf_provisioning.py para realizar el downgrade manual del Juniper.")
-            sys.exit(1)  # El 'finally' de juniper_config() cierra minicom durante el unwind
+            sys.exit(1)
 
         print("[✓] Version de JUNOS validada correctamente.")
 
-        # Esperar el prompt de shell antes de entrar al cli
         _juniper_expect_or_fail(
             child,
             [r"%\s"],
@@ -1680,7 +1528,6 @@ def juniper_config():
             error_msg="No se detecto el prompt de shell ('%') del Juniper tras el login."
         )
 
-        # --- PASO D: Entrar al CLI y modo de configuracion ---
         print("[*] Entrando al CLI del Juniper...")
         child.sendline("cli")
         _juniper_expect_or_fail(
@@ -1694,7 +1541,6 @@ def juniper_config():
             error_msg="No se detecto el prompt de configuracion ('#') tras ejecutar 'configure'."
         )
 
-        # --- PASO E: Contrasena de root-authentication ---
         print("[*] Configurando root-authentication plain-text-password...")
         child.sendline("set system root-authentication plain-text-password")
         _juniper_expect_or_fail(
@@ -1719,7 +1565,6 @@ def juniper_config():
             error_msg="El 'commit' de root-authentication no reporto 'commit complete'."
         )
 
-        # --- PASO F: Eliminar chassis auto-image-upgrade ---
         print("[*] Eliminando chassis auto-image-upgrade...")
         child.sendline("delete chassis auto-image-upgrade")
         _juniper_expect_or_fail(
@@ -1733,7 +1578,6 @@ def juniper_config():
             error_msg="El 'commit' de 'delete chassis auto-image-upgrade' no reporto 'commit complete'."
         )
 
-        # --- PASO G: Wildcard range (limpieza y seteo de interfaces) ---
         wildcard_commands = [
             "wildcard range delete interfaces et-0/0/[0-31] unit 0 family inet",
             "wildcard range delete interfaces et-0/0/[0-31]:[0-3] unit 0 family inet",
@@ -1759,7 +1603,6 @@ def juniper_config():
             error_msg="El 'commit' final de interfaces no reporto 'commit complete'."
         )
 
-        # --- PASO H: Salir de configuracion y validaciones finales ---
         child.sendline("exit")
         _juniper_expect_or_fail(
             child, [r">\s"], timeout=20,
@@ -1787,7 +1630,6 @@ def juniper_config():
             error_msg="No se recibio respuesta de 'show system alarms' (segunda revision)."
         )
 
-        # --- PASO I: Salir del CLI y reiniciar el equipo ---
         print("[*] Saliendo del CLI de JUNOS...")
         child.sendline("exit")
         _juniper_expect_or_fail(
@@ -1797,12 +1639,9 @@ def juniper_config():
 
         print("[*] Ejecutando 'shutdown -r now' para reiniciar el Juniper...")
         child.sendline("shutdown -r now")
-        # El equipo comienza a reiniciar y la sesion serial se vuelve inestable;
-        # no se espera un prompt especifico, solo se da tiempo a que el comando se envie.
         time.sleep(5)
 
     finally:
-        # --- PASO J: Salir de minicom (Ctrl+A, X) sin importar el resultado anterior ---
         _minicom_exit(child)
 
     _print_green_banner("CONFIGURACION DEL JUNIPER COMPLETADA EXITOSAMENTE.")
@@ -1820,7 +1659,6 @@ def zpe_config():
         "a un puerto USB 3.0 del Superlogics/ABMX."
     )
 
-    # --- PASO A: Exigir ENTER del usuario y validar el cable de consola antes de continuar ---
     child, used_device = _wait_for_console_connection_enter(mensaje, ["/dev/ttyUSB0", "/dev/ttyUSB1"], 115200)
     child.logfile_read = sys.stdout
 
@@ -1828,9 +1666,6 @@ def zpe_config():
     already_configured = False
 
     try:
-        # --- PASO B: Login automatico (user: admin / password: admin) ---
-        # Los patrones no se anclan al final de linea: minicom refresca su
-        # barra de estado periodicamente, lo que rompe un anclaje estricto.
         print("[*] Buscando prompt de login del ZPE...")
         child.sendline("")
         idx = child.expect([
@@ -1842,7 +1677,6 @@ def zpe_config():
         ], timeout=20)
 
         if idx == 0:
-            # --- El hostname ya es 'nodegrid' -> el ZPE ya fue configurado previamente ---
             print("[=] Se detecto el prompt 'nodegrid login:': "
                   "esto indica que el ZPE ya se encuentra configurado.")
             already_configured = True
@@ -1879,7 +1713,6 @@ def zpe_config():
 
         print("[✓] Login en el ZPE completado.")
 
-        # --- PASO C: Navegar a network_connections y leer la MAC de ETH1 ---
         print("[*] Consultando /settings/network_connections...")
         child.sendline("cd /settings/network_connections")
         idx = child.expect([r"#\s", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
@@ -1915,14 +1748,10 @@ def zpe_config():
         print(f"[+] MAC ETH1 (ZPE) detectada: {zpe_mac}")
 
     finally:
-        # --- PASO D: Salir de minicom (Ctrl+A, X). Se ejecuta una sola vez,
-        # tanto en el camino exitoso como en cualquier fallo anterior. ---
         _minicom_exit(child)
 
-    # --- PASO E: Guardar la MAC del ZPE en el estado ---
     mark_step_completed("zpe_config", {"zpe_console_device": used_device, "zpe_mac": zpe_mac, "zpe_already_configured": already_configured})
 
-    # --- PASO F: Actualizar /etc/dhcp/dhcpd.conf con la MAC real del ZPE ---
     print("[*] Actualizando /etc/dhcp/dhcpd.conf con la MAC real del ZPE...")
     new_line = f"host zpe {{ hardware ethernet {zpe_mac}; fixed-address 10.0.0.253; }}"
     sed_cmd = (
@@ -1938,7 +1767,6 @@ def zpe_config():
     run_interactive("sudo systemctl restart isc-dhcp-server")
     run_interactive("sudo systemctl restart isc-dhcp-server6")
 
-    # Si ya estaba configurado previamente, omitimos únicamente el script masivo de puertos por SSH
     if already_configured:
         _print_green_banner(
             "EL ZPE YA ESTABA CONFIGURADO. Se extrajo la MAC y se actualizó el DHCP, "
@@ -1946,7 +1774,6 @@ def zpe_config():
         )
         return
 
-    # --- PASO G: Ejecutar script de configuracion de todos los puertos del ZPE via SSH ---
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     zpe_script_dir = f"/home/{sudo_user}/lego-infra/lego_setup/lego_zpe_console_server"
     ssh_cmd = (
@@ -2019,12 +1846,6 @@ def _scp_download_once(remote_user, remote_host, remote_path, destination="."):
         )
 
 def _scp_download(remote_user, remote_host, remote_path, destination="."):
-    """Descarga (recursivamente) 'remote_path' desde 'remote_user@remote_host' hacia
-    'destination' via scp, manejando el prompt de huella SSH y de contrasena
-    (se usa SUDO_PASSWORD, siguiendo la misma convencion que run_scp_from_mirror
-    y download_python_tools). Con reintentos (backoff exponencial) ante fallos
-    transitorios de red; el banner de FALLO solo se muestra si se agotan
-    todos los intentos."""
     try:
         _retry_download(
             lambda: _scp_download_once(remote_user, remote_host, remote_path, destination),
@@ -2035,11 +1856,6 @@ def _scp_download(remote_user, remote_host, remote_path, destination="."):
         raise
 
 def _run_shell_sequence(commands, timeout=600):
-    """Ejecuta 'commands' UNO POR UNO (sin encadenarlos con '&&' en una sola linea)
-    dentro de una UNICA sesion de bash persistente, para que efectos como 'cd'
-    se mantengan de un comando al siguiente, igual que si se tecleasen a mano
-    en una terminal. Maneja automaticamente cualquier prompt de 'sudo' que
-    aparezca en medio de la secuencia."""
     print("[*] Ejecutando secuencia de comandos (sesion de shell persistente):")
     for c in commands:
         print(f"    $ {c}")
@@ -2050,11 +1866,6 @@ def _run_shell_sequence(commands, timeout=600):
     try:
         for cmd in commands:
             marker = f"__CMDDONE_{uuid.uuid4().hex}__"
-            # Se envia el comando y el marcador de finalizacion en una sola
-            # linea compuesta (una unica llamada a sendline). Si se enviaran
-            # en dos sendline() separados, y 'cmd' dispara un prompt de sudo,
-            # el segundo sendline podria "colarse" como si fuera la respuesta
-            # al prompt de contrasena, ya que sudo lee directo de la terminal.
             child.sendline(f"{cmd}; echo {marker}$?")
 
             exit_code = None
@@ -2097,7 +1908,6 @@ def vrmu_util_config():
     remote_user = sudo_user
     home_dir = f"/home/{sudo_user}"
 
-    # --- PASO 1: Descargar por SCP los directorios/archivos necesarios ---
     items_to_download = [
         "viperfish-dvc",
         "vrmu_util",
@@ -2110,17 +1920,12 @@ def vrmu_util_config():
         print(f"[*] Descargando '{item}' desde {remote_host}...")
         _scp_download(remote_user, remote_host, remote_path, destination=".")
 
-    # --- PASO 2: Copiar la imagen 'tross' de viperfish-dvc/vin-sweep a /tftpboot/ ---
-    # Comandos enviados por separado (no encadenados con '&&'), como pasos independientes.
-    # /tftpboot/ requiere permisos elevados, de ahi el 'sudo' en el cp.
     print("[*] Copiando imagen 'tross' a /tftpboot/...")
     _run_shell_sequence([
         "cd viperfish-dvc/vin-sweep/",
         "sudo cp -r tross /tftpboot/",
     ])
 
-    # --- PASO 3: Copiar vrmu_util al home del usuario y darle permisos de ejecucion ---
-    # Comandos enviados por separado (no encadenados con '&&'), como pasos independientes.
     print("[*] Copiando vrmu_util al home y asignando permisos...")
 
     downloaded_vrmu_path = os.path.abspath("vrmu_util")
@@ -2128,9 +1933,6 @@ def vrmu_util_config():
 
     if (os.path.exists(downloaded_vrmu_path) and os.path.exists(home_vrmu_path)
             and os.path.samefile(downloaded_vrmu_path, home_vrmu_path)):
-        # El script ya se ejecuto desde el home del usuario, por lo que 'vrmu_util'
-        # descargado en el PASO 1 ya es el mismo archivo que '~/vrmu_util'.
-        # 'cp' fallaria con "same file", asi que solo aplicamos el chmod.
         print("[=] 'vrmu_util' ya se encuentra en el home del usuario. Omitiendo la copia, solo se ajustan permisos...")
         _run_shell_sequence([
             "cd",
@@ -2156,9 +1958,6 @@ def tross_capture_mac():
     _print_yellow_banner("Por favor, introduzca la direccion MAC del Tross.")
     mac_input = input("MAC del Tross: ").strip()
 
-    # Normalizamos: nos quedamos solo con los caracteres hexadecimales,
-    # sin importar si el usuario la escribio con ':', '-', espacios o sin
-    # ningun separador, y luego reconstruimos el formato con ':' cada 2 caracteres.
     clean_mac = re.sub(r'[^0-9a-fA-F]', '', mac_input)
 
     if len(clean_mac) != 12:
@@ -2173,7 +1972,6 @@ def tross_capture_mac():
 
     mark_step_completed("tross_capture_mac", {"tross_mac": tross_mac})
 
-    # --- Actualizar /etc/dhcp/dhcpd.conf con la MAC real del Tross ---
     print("[*] Actualizando /etc/dhcp/dhcpd.conf con la MAC real del Tross...")
     new_line = f"host tross {{ hardware ethernet {tross_mac}; fixed-address 10.0.0.251; }}"
     sed_cmd = (
@@ -2187,38 +1985,21 @@ def tross_capture_mac():
 
     print("[✓] MAC del Tross capturada y aplicada exitosamente.")
 
-# ==============================================================================
-# TROSS_CONFIG(): configuracion automatica del Tross via consola serial
-# (relay por el puerto 17 del ZPE) + reconfiguracion de red del ZPE + VRMU.
-# ==============================================================================
 
-# Acepta cualquier hostname entre "root@" y ":" (vacio, "(none)" o uno real),
-# ya que varia segun el momento del boot.
 TROSS_PROMPT = r"root@[^:\r\n]*:[^\r\n]*"
 
-# Ancla "=>" al inicio de linea y al final del buffer, para no confundirlo
-# con apariciones de "=>" dentro del log normal de boot (ej. "bootCount 0 => 1").
 UBOOT_PROMPT = r"\r\n=> $"
 
-# Aviso del gateway de consola del ZPE (Nodegrid) cuando la sesion queda en
-# modo solo lectura: ninguna tecla enviada llega al Tross. La unica
-# recuperacion conocida en ese caso es reiniciar el propio ZPE.
 ZPE_READONLY_MARKER = "[read-only -- use ^X t ? for help]"
 
 class _ZpeConsoleReadOnlyError(RuntimeError):
-    """Consola del ZPE atascada en modo solo lectura. TROSS_CONFIG() la
-    captura para pedir el reinicio del ZPE y reintentar."""
     pass
 
 def _paced_sendline(child, line, delay=0.4):
-    """Envia una linea a la consola con una breve pausa posterior, para no
-    saturar al equipo remoto con comandos consecutivos."""
     child.sendline(line)
     time.sleep(delay)
 
 def _print_red_banner(message):
-    """Imprime un mensaje de alerta en rojo con borde. A diferencia de
-    print_ascii_fail(), soporta mensajes multilinea."""
     RED = "\033[91m\033[1m"
     RESET = "\033[0m"
     border = "=" * 80
@@ -2228,7 +2009,6 @@ def _print_red_banner(message):
     print(f"{border}{RESET}\n")
 
 def _green_wait(seconds, label="Esperando"):
-    """Espera 'seconds' segundos mostrando un contador regresivo en verde."""
     GREEN = "\033[92m"
     RESET = "\033[0m"
     print(f"[*] {label}: esperando {seconds}s...")
@@ -2244,31 +2024,24 @@ def _green_wait(seconds, label="Esperando"):
     sys.stdout.write(f"\r{GREEN}[{label}] Completado.{' ' * 20}{RESET}\n")
 
 def _update_state_config(extra):
-    """Actualiza state['config'] sin marcar ningun paso como completado."""
     state = load_state()
     state.setdefault("config", {}).update(extra)
     save_state(state)
 
 def _mac_plus_offset(mac, offset):
-    """Suma 'offset' al ultimo octeto de una MAC ('xx:xx:xx:xx:xx:xx')."""
     parts = mac.split(":")
     last = (int(parts[-1], 16) + offset) % 256
     parts[-1] = f"{last:02x}"
     return ":".join(parts)
 
 def _zpe_console_take_control(child):
-    """Toma control de escritura de un puerto de consola relay del ZPE que
-    abrio en modo solo lectura, con la secuencia Ctrl-X, t."""
     print("[*] Tomando control de escritura de la consola (Ctrl-X, t)...")
-    child.send(chr(0x18))  # Ctrl-X
+    child.send(chr(0x18))
     time.sleep(0.3)
     child.send("t")
     time.sleep(0.3)
 
 def _drain_buffered_output(child, idle_timeout=0.3):
-    """Descarta el scrollback ya bufferizado en la sesion (el ZPE lo vuelca
-    al conectar) leyendo en modo no bloqueante hasta que no llegue nada
-    nuevo durante 'idle_timeout'."""
     try:
         while True:
             child.read_nonblocking(size=65536, timeout=idle_timeout)
@@ -2278,32 +2051,35 @@ def _drain_buffered_output(child, idle_timeout=0.3):
         pass
 
 def _open_zpe_console_telnet(port, timeout=45, take_control=False):
-    """Abre una sesion telnet al puerto serial relay del ZPE (Nodegrid) que
-    da acceso a la consola del Tross conectada fisicamente al puerto 17.
-
-    take_control=True manda la toma de control (Ctrl-X, t) justo despues de
-    conectar; usar solo cuando la conexion se abre antes de un boot en vivo,
-    ya que enviarla sobre un prompt idle ('=>' o 'root@:') contamina el
-    buffer de comandos del equipo. La toma de control reactiva (solo si se
-    detecta el aviso de solo lectura) vive en _tross_ensure_logged_in."""
     cmd = f"telnet 10.0.0.253 {port}"
     print(f"[CMD Interactive] {cmd}")
     child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=timeout)
     child.logfile_read = sys.stdout
-    child.expect([r"Escape character is", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+    idx = child.expect([r"Escape character is", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
+    if idx != 0:
+        output = (child.before or "").strip()
+        try:
+            child.close(force=True)
+        except Exception:
+            pass
+        print_ascii_fail(
+            f"No se pudo conectar a la consola del ZPE (telnet 10.0.0.253 {port}). "
+            f"Verifique que el ZPE este encendido y accesible en la red."
+        )
+        raise RuntimeError(
+            f"No se pudo abrir la consola del ZPE (10.0.0.253:{port}): {output or 'sin respuesta'}"
+        )
     if take_control:
         _zpe_console_take_control(child)
     _drain_buffered_output(child)
     return child
 
 def _zpe_console_exit(child):
-    """Sale de una sesion de consola relay del ZPE con Ctrl+5 seguido de 'q'.
-    Segura de llamar mas de una vez sobre el mismo 'child'."""
     if child is None or getattr(child, "closed", False):
         return
     print("[*] Saliendo de la consola relay del ZPE (Ctrl+5, q)...")
     try:
-        child.send(chr(0x1D))  # Ctrl+5
+        child.send(chr(0x1D))
         time.sleep(0.5)
         child.sendline("q")
         child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=15)
@@ -2317,12 +2093,6 @@ def _zpe_console_exit(child):
         os.system("clear")
 
 def _uboot_break_spam(child, max_seconds=180, spam_window=25):
-    """Interrumpe el autoboot del Tross. Espera en silencio (sin enviar
-    teclas) hasta leer 'Hit any key to stop autoboot:', y recien ahi manda
-    teclas de interrupcion durante 'spam_window' segundos. Enter y espacio
-    son las unicas teclas validas: las teclas de control (Ctrl-C, Ctrl-X,
-    etc.) son interceptadas por el gateway de consola del ZPE antes de
-    llegar al equipo."""
     print("[*] Esperando (sin enviar teclas aun) el mensaje 'Hit any key to stop autoboot:' del Tross...")
     idx = child.expect([r"Hit any key to stop autoboot", pexpect.TIMEOUT, pexpect.EOF], timeout=max_seconds)
     if idx != 0:
@@ -2362,9 +2132,6 @@ def _uboot_break_spam(child, max_seconds=180, spam_window=25):
     raise RuntimeError("No se pudo interrumpir el autoboot del Tross a tiempo.")
 
 def _uboot_cmd_check(child, cmd, expected_substrings, timeout=45, fail_msg=None):
-    """Envia 'cmd' en U-Boot y valida que TODAS las cadenas en
-    'expected_substrings' (str o lista) aparezcan en la respuesta antes del
-    siguiente prompt '=>'. Si no, banner de fallo + RuntimeError."""
     if isinstance(expected_substrings, str):
         expected_substrings = [expected_substrings]
     print(f"[CMD U-Boot] {cmd}")
@@ -2378,9 +2145,6 @@ def _uboot_cmd_check(child, cmd, expected_substrings, timeout=45, fail_msg=None)
     return output
 
 def _wait_for_pattern_with_enters(child, pattern, max_seconds, interval=5, label="Esperando"):
-    """Envia ENTER cada 'interval' segundos (hasta 'max_seconds' en total)
-    mostrando un contador en verde, hasta que 'pattern' aparezca en el stream.
-    Devuelve True si se encontro el patron, False si se agoto el tiempo."""
     GREEN = "\033[92m"
     RESET = "\033[0m"
     elapsed = 0
@@ -2407,10 +2171,6 @@ def _wait_for_pattern_with_enters(child, pattern, max_seconds, interval=5, label
     return False
 
 def _wait_silently_for_pattern(child, pattern, max_seconds, poll_interval=5, label="Esperando"):
-    """Como _wait_for_pattern_with_enters, pero sin enviar ninguna tecla
-    mientras espera. Se usa tras un 'reset' real: cualquier tecla enviada
-    durante la ventana 'Hit any key to stop autoboot' interrumpiria el
-    autoboot en vez de dejarlo avanzar solo hasta 'login:'."""
     GREEN = "\033[92m"
     RESET = "\033[0m"
     elapsed = 0
@@ -2429,11 +2189,6 @@ def _wait_silently_for_pattern(child, pattern, max_seconds, poll_interval=5, lab
 
 def _run_tross_cmd_and_wait(child, cmd, max_wait_seconds, poll_interval=5, label="Esperando",
                              prompt_pattern=None):
-    """Envia 'cmd' dentro de la sesion del Tross y espera a que regrese el
-    prompt (por defecto TROSS_PROMPT), mostrando un contador en verde mientras
-    dura la espera. Devuelve el texto acumulado (child.before) una vez que el
-    prompt aparece. Lanza RuntimeError si se agota 'max_wait_seconds' o si la
-    sesion se cierra (EOF) antes de tiempo."""
     prompt_pattern = prompt_pattern or TROSS_PROMPT
     GREEN = "\033[92m"
     RESET = "\033[0m"
@@ -2464,11 +2219,6 @@ def _run_tross_cmd_and_wait(child, cmd, max_wait_seconds, poll_interval=5, label
             raise RuntimeError(f"Timeout ({max_wait_seconds}s) esperando la finalizacion de '{cmd}'.")
 
 def _run_local_cmd_with_wait(cmd, max_wait_seconds, poll_interval=10, label="Esperando"):
-    """Ejecuta 'cmd' localmente (bash -c) mostrando un contador en verde
-    mientras corre, hasta 'max_wait_seconds'. Devuelve (output, exit_code)
-    sin lanzar excepcion por codigo de salida no-cero (el llamador decide
-    que hacer con la salida, ya que aqui lo relevante es el TEXTO de
-    respuesta, no solo el exit code)."""
     GREEN = "\033[92m"
     RESET = "\033[0m"
     marker = f"__CMDDONE_{uuid.uuid4().hex}__"
@@ -2498,10 +2248,6 @@ def _run_local_cmd_with_wait(cmd, max_wait_seconds, poll_interval=10, label="Esp
             raise RuntimeError(f"Timeout ({max_wait_seconds}s) esperando la finalizacion de '{cmd}'.")
 
 def _tross_do_login(child):
-    """Ingresa las credenciales root/google en el prompt 'login:' del Tross
-    y deja la sesion en TROSS_PROMPT. Factorizado porque se usa desde varias
-    etapas (boot inicial, tras 'reset' post-imager, y desde el resumen de
-    sesion _tross_ensure_logged_in)."""
     print("[*] Ingresando credenciales de login (root / google)...")
     _paced_sendline(child, "root")
     idx = child.expect([r"[Pp]assword:", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
@@ -2515,9 +2261,6 @@ def _tross_do_login(child):
         raise RuntimeError("No se pudo iniciar sesion en el Tross (root/google).")
 
 def _tross_netboot_and_login(child):
-    """Desde el prompt '=>' de U-Boot, corre el boot por red (netboot) hacia
-    el kernel del Tross, espera el prompt 'login:' y loguea. Se asume que el
-    U-Boot ya fue flasheado (etapa 'tross_uboot_flashed')."""
     _paced_sendline(
         child, "setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254"
     )
@@ -2537,19 +2280,6 @@ def _tross_netboot_and_login(child):
     _tross_do_login(child)
 
 def _tross_ensure_logged_in(child):
-    """Punto de entrada comun para dejar al Tross logueado (TROSS_PROMPT) al
-    reconectar la consola, ya sea la primera vez en la etapa o al resumir
-    una corrida anterior. Detecta el estado de la sesion y hace lo minimo
-    necesario para llegar a un prompt de shell:
-      - Ya esta en TROSS_PROMPT -> no hace nada.
-      - Esta en 'login:' -> loguea directamente.
-      - Esta en '=>' de U-Boot -> corre el netboot completo y loguea.
-      - Esta en plena ventana 'Hit any key to stop autoboot' -> espera en
-        silencio a que el autoboot termine solo, sin interrumpirlo.
-
-    Si el sondeo inicial no reconoce ningun estado y se detecta el aviso de
-    sesion solo lectura del ZPE, reintenta la toma de control una vez antes
-    de escalar a _ZpeConsoleReadOnlyError."""
     idx = child.expect([
         TROSS_PROMPT, r"login:", UBOOT_PROMPT, r"Hit any key to stop autoboot",
         pexpect.TIMEOUT, pexpect.EOF
@@ -2575,7 +2305,6 @@ def _tross_ensure_logged_in(child):
         _tross_netboot_and_login(child)
         return
 
-    # Sin match en el sondeo pasivo: se manda un ENTER y se vuelve a sondear.
     _paced_sendline(child, "")
     idx = child.expect([TROSS_PROMPT, r"login:", UBOOT_PROMPT, pexpect.TIMEOUT, pexpect.EOF], timeout=30)
     if idx == 0:
@@ -2621,10 +2350,6 @@ def _tross_ensure_logged_in(child):
     raise RuntimeError("Estado desconocido de la sesion del Tross al reconectar.")
 
 def _tross_reconfigure_zpe_eth1():
-    """Se conecta por SSH a admin@10.0.0.253 (ZPE) y configura ETH1 en modo
-    estatico (10.0.0.253/8, gateway 10.0.0.254), validando el 'show' contra
-    la respuesta esperada, y hace 'commit' + 'exit' confirmando la perdida de
-    cambios no comiteados con 'yes'."""
     print("[*] Conectando por SSH a admin@10.0.0.253 para reconfigurar ETH1...")
     ssh_cmd = "ssh admin@10.0.0.253"
     print(f"[CMD Interactive] {ssh_cmd}")
@@ -2715,17 +2440,6 @@ def _tross_reconfigure_zpe_eth1():
     print("[✓] Sesion SSH hacia el ZPE cerrada.")
 
 def TROSS_CONFIG():
-    """Configuracion automatica completa del Tross: registra su MAC en el
-    DHCP, lo bootea y flashea via consola serial, reconfigura la red del
-    ZPE, detecta el lease de red del Tross y corre el flasheo/actualizacion
-    de firmware con vrmu_util (ver _tross_config_attempt para el detalle de
-    las 13 etapas).
-
-    Si la consola del ZPE queda atascada en modo solo lectura
-    (_ZpeConsoleReadOnlyError), pide al operador que reinicie el ZPE y
-    reintenta _tross_config_attempt(): como cada etapa tiene su propia
-    bandera en tross_config.json, el reintento retoma en la etapa que
-    fallo en vez de repetir todo desde cero."""
     if is_tross_step_completed("TROSS_CONFIG"):
         print("[=] Paso 'TROSS_CONFIG' ya fue ejecutado previamente. Omitiendo...")
         return
@@ -2748,8 +2462,6 @@ def TROSS_CONFIG():
             print("[*] Reintentando TROSS_CONFIG (retomando en la ultima etapa pendiente)...")
 
 def _tross_stage_dhcp(tross_mac):
-    """ETAPA 1/13: aplicar la MAC del Tross en /etc/dhcp/dhcpd.conf y
-    reiniciar los servicios DHCP."""
     if is_tross_step_completed("tross_dhcp_applied"):
         print("[=] Etapa 'tross_dhcp_applied' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -2771,9 +2483,6 @@ def _tross_stage_dhcp(tross_mac):
     mark_tross_step_completed("tross_dhcp_applied")
 
 def _tross_stage_flash_uboot():
-    """ETAPA 2/13: conectar la consola, pedir el reinicio fisico manual del
-    Tross, interrumpir el autoboot, flashear U-Boot (sf probe/erase/write/
-    erase) y confirmar que el equipo vuelve a quedar vivo en el prompt '=>'."""
     if is_tross_step_completed("tross_uboot_flashed"):
         print("[=] Etapa 'tross_uboot_flashed' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -2787,8 +2496,6 @@ def _tross_stage_flash_uboot():
 
     child = _open_zpe_console_telnet(7017, take_control=True)
     try:
-        # El ZPE vuelca el scrollback del ultimo boot al conectar (no es en
-        # vivo), por eso se pide el reinicio fisico recien ahora.
         _print_yellow_banner(
             "Ya se establecio la conexion a la consola del Tross. Ahora reinicie "
             "FISICAMENTE el Tross de forma manual (apague y encienda, o presione "
@@ -2798,8 +2505,6 @@ def _tross_stage_flash_uboot():
 
         _uboot_break_spam(child)
 
-        # --- tftpboot del uboot, con reintento completo del bloque si la
-        # respuesta no coincide con lo esperado ---
         while True:
             _paced_sendline(
                 child, "setenv ipaddr 10.0.0.251;setenv netmask 255.255.0.0;setenv gatewayip 10.0.0.254"
@@ -2852,8 +2557,6 @@ def _tross_stage_flash_uboot():
     mark_tross_step_completed("tross_uboot_flashed")
 
 def _tross_stage_boot_linux():
-    """ETAPA 3/13: bootear Linux por red desde el '=>' de U-Boot, loguear y
-    validar la version de kernel (uname -a)."""
     if is_tross_step_completed("tross_linux_booted"):
         print("[=] Etapa 'tross_linux_booted' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -2881,8 +2584,6 @@ def _tross_stage_boot_linux():
     mark_tross_step_completed("tross_linux_booted")
 
 def _tross_stage_download_imageset():
-    """ETAPA 4/13: descargar imageset.tgz por TFTP (con reintento ante
-    mismatch de MAC o timeout transitorio de red) y validar 'ls' + 'md5sum'."""
     if is_tross_step_completed("tross_imageset_downloaded"):
         print("[=] Etapa 'tross_imageset_downloaded' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -2922,9 +2623,6 @@ def _tross_stage_download_imageset():
                 input("Presione ENTER para continuar...")
                 continue
             if is_transient_failure:
-                # Timeout de red, no mismatch de MAC: probablemente
-                # transitorio (se ha visto acompañado de un corte breve del
-                # link durante la espera).
                 _print_red_banner(
                     "La descarga de imageset.tgz por TFTP fallo por timeout "
                     "('Retry limit exceeded' / 'server read timed out'), no por "
@@ -2967,8 +2665,6 @@ def _tross_stage_download_imageset():
     mark_tross_step_completed("tross_imageset_downloaded")
 
 def _tross_stage_run_imager():
-    """ETAPA 5/13: extraer e imagear el Tross (tar + imager, ~20 minutos) y
-    validar el tail de la respuesta."""
     if is_tross_step_completed("tross_imager_done"):
         print("[=] Etapa 'tross_imager_done' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3005,8 +2701,6 @@ def _tross_stage_run_imager():
     mark_tross_step_completed("tross_imager_done")
 
 def _tross_stage_bootenv():
-    """ETAPA 6/13: reiniciar el Tross, configurar bootcase_1/bootdelay,
-    guardar el entorno (saveenv) y volver a loguear tras el reset final."""
     if is_tross_step_completed("tross_bootenv_saved"):
         print("[=] Etapa 'tross_bootenv_saved' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3036,8 +2730,6 @@ def _tross_stage_bootenv():
 
         print("[CMD U-Boot] reset")
         _paced_sendline(child, "reset")
-        # Espera en silencio: un ENTER durante la ventana 'Hit any key to
-        # stop autoboot' que sigue al reset interrumpiria el autoboot.
         if not _wait_silently_for_pattern(child, r"login:", max_seconds=210, poll_interval=5,
                                            label="Esperando prompt 'login:' tras reset (sin enviar teclas)"):
             print_ascii_fail("No se recibio el prompt 'login:' del Tross tras 'reset'.")
@@ -3050,7 +2742,6 @@ def _tross_stage_bootenv():
     mark_tross_step_completed("tross_bootenv_saved")
 
 def _tross_stage_zpe_eth1():
-    """ETAPA 7/13: reconfigurar ETH1 del ZPE via SSH (10.0.0.253 estatica)."""
     if is_tross_step_completed("tross_zpe_eth1_reconfigured"):
         print("[=] Etapa 'tross_zpe_eth1_reconfigured' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3061,8 +2752,6 @@ def _tross_stage_zpe_eth1():
     mark_tross_step_completed("tross_zpe_eth1_reconfigured")
 
 def _tross_stage_lease(tross_mac):
-    """ETAPA 8/13: reconectar la consola del Tross, detectar su 'lease' de
-    red (a partir de las leases del ZPE) y validarlo con ping."""
     if is_tross_step_completed("tross_lease_detected"):
         print("[=] Etapa 'tross_lease_detected' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3075,8 +2764,6 @@ def _tross_stage_lease(tross_mac):
         target_mac = _mac_plus_offset(tross_mac, 2)
         print(f"[*] Buscando el lease asociado a la MAC {target_mac} (tross_mac + 2)...")
 
-        # El lease puede tardar en aparecer si el Tross aun no renovo su
-        # DHCP tras la reconfiguracion de ETH1 del ZPE.
         LEASE_WAIT_MAX_SECONDS = 180
         LEASE_WAIT_POLL_SECONDS = 15
         matches = []
@@ -3119,9 +2806,6 @@ def _tross_stage_lease(tross_mac):
     mark_tross_step_completed("tross_lease_detected", {"tross_lease": tross_lease})
 
 def _tross_stage_vrmu_flash(tross_lease):
-    """ETAPA 9/13: flasheo del Tross via vrmu_util (comando repetido 2
-    veces, con 10 minutos de espera forzosa entre corridas, ya que el
-    flasheo sigue en curso en el Tross aunque el comando ya haya retornado)."""
     if is_tross_step_completed("tross_vrmu_flash_done"):
         print("[=] Etapa 'tross_vrmu_flash_done' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3152,7 +2836,6 @@ def _tross_stage_vrmu_flash(tross_lease):
     mark_tross_step_completed("tross_vrmu_flash_done")
 
 def _tross_stage_vrmu_upgrade(tross_lease):
-    """ETAPA 10/13: actualizacion de firmware periferico via vrmu_util."""
     if is_tross_step_completed("tross_vrmu_upgrade_done"):
         print("[=] Etapa 'tross_vrmu_upgrade_done' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3188,11 +2871,6 @@ def _tross_stage_vrmu_upgrade(tross_lease):
 TROSS_LEDARE_FW_VERSION = "1.8.5"
 
 def _tross_stage_vrmu_fw_version_check(tross_lease):
-    """ETAPA 11/13: verifica, via vrmu_util, que la version de firmware del
-    Ledare (bloque 'streamz_name: "/flash/fw-version"') haya quedado en la
-    version objetivo (por defecto 'Ledare 1.8.5'). Reintenta con espera, ya
-    que el cambio de firmware puede seguir aplicandose en segundo plano
-    despues de que el comando de upgrade (etapa 10) haya retornado."""
     if is_tross_step_completed("tross_vrmu_fw_version_checked"):
         print("[=] Etapa 'tross_vrmu_fw_version_checked' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3263,10 +2941,6 @@ def _tross_stage_vrmu_fw_version_check(tross_lease):
         raise RuntimeError("No se pudo determinar la version de firmware del Ledare (fw-version).")
 
 def _parse_rectifier_voltages(dc_voltage_output):
-    """Extrae pares (device_name, voltage) de cada bloque
-    'streamz_name: "/rectifier/dc-voltage"'. El valor relevante es el
-    'float_value' con 'units: "volts"' dentro de ese bloque, no el campo de
-    "amps" que el contexto de grep arrastra del bloque anterior."""
     pattern = re.compile(
         r'streamz_name:\s*"/rectifier/dc-voltage".*?device_name:\s*"([^"]*)".*?'
         r'units:\s*"volts".*?float_value:\s*([\-0-9.]+)',
@@ -3275,8 +2949,6 @@ def _parse_rectifier_voltages(dc_voltage_output):
     return [(m.group(1), float(m.group(2))) for m in pattern.finditer(dc_voltage_output)]
 
 def _ping_until_up(ip, description, max_wait_seconds=300, poll_interval=10):
-    """Hace ping a 'ip' repetidamente hasta obtener respuesta o agotar
-    'max_wait_seconds'. Devuelve True/False segun si respondio a tiempo."""
     print(f"[*] Esperando a que {description} ({ip}) responda ping...")
     elapsed = 0
     while True:
@@ -3293,11 +2965,6 @@ def _ping_until_up(ip, description, max_wait_seconds=300, poll_interval=10):
         elapsed += poll_interval
 
 def _tross_validate_instruments_after_power_cycle():
-    """Tras un power-cycle del rack completo, confirma que la cadena de
-    equipos volvio a arrancar en orden: Juniper (10.0.0.254), ZPE
-    (10.0.0.253) -- la consola del Tross se accede a traves de el -- y por
-    ultimo el propio Tross via telnet. Corta con una falla clara si alguno
-    no responde a tiempo."""
     print("--- Validando instrumentos tras el power-cycle del rack (Juniper -> ZPE -> Tross) ---")
 
     if not _ping_until_up("10.0.0.254", "Juniper", max_wait_seconds=300, poll_interval=10):
@@ -3321,15 +2988,6 @@ def _tross_validate_instruments_after_power_cycle():
     print("[✓] Validacion de instrumentos completa: Juniper, ZPE y Tross arriba.")
 
 def _measure_rectifier_voltages_with_retry(tross_lease, max_retries=3, retry_wait_seconds=300):
-    """Mide el voltaje DC de los rectificadores via vrmu_util. Reintenta
-    hasta 'max_retries' veces (con 'retry_wait_seconds' de espera entre
-    intentos) si la conexion falla o si todas las lecturas dan 0 -- comun
-    justo despues de un power-cycle, mientras el servicio de telemetria del
-    Tross todavia esta levantando.
-
-    Si se agotan los reintentos sin lecturas utiles, pregunta al operador
-    (y/n) si quiere borrar tross_config.json y reiniciar la configuracion
-    desde cero; en cualquier caso, termina el programa con una falla."""
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
     home_dir = f"/home/{sudo_user}"
     dc_voltage_cmd = (
@@ -3392,24 +3050,6 @@ def _measure_rectifier_voltages_with_retry(tross_lease, max_retries=3, retry_wai
     )
 
 def _tross_stage_voltage_check(tross_lease):
-    """ETAPA 12/13: valida que todos los rectificadores del Tross lean por
-    encima de 50V DC (streamz '/rectifier/dc-voltage'). La medicion en si
-    reintenta ante fallas de conexion o lecturas en 0 (ver
-    _measure_rectifier_voltages_with_retry).
-
-    Como la unica recuperacion ante un voltaje genuinamente bajo es un
-    power-cycle del rack completo -- que mataria a este mismo proceso --
-    la etapa funciona en dos fases:
-
-    Fase 1: si algun rectificador lee <=50V, guarda la bandera
-    'tross_voltage_check_awaiting_power_cycle', pide al operador un power
-    cycle del rack completo, y termina el programa (sys.exit(0)).
-
-    Fase 2 (proxima corrida, con esa bandera activa): valida primero que
-    Juniper, ZPE y Tross hayan vuelto a arrancar
-    (_tross_validate_instruments_after_power_cycle) y vuelve a medir. Si
-    ahora todos leen >50V, la etapa se completa. Si no, se considera una
-    falla irrecuperable: borra tross_config.json y termina con error."""
     if is_tross_step_completed("tross_voltage_check_done"):
         print("[=] Etapa 'tross_voltage_check_done' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3417,10 +3057,6 @@ def _tross_stage_voltage_check(tross_lease):
 
     awaiting_power_cycle = is_tross_step_completed("tross_voltage_check_awaiting_power_cycle")
     if awaiting_power_cycle:
-        # Ya se habia pedido el power-cycle del rack completo en una corrida
-        # anterior de esta misma etapa. Antes de repetir la medicion de
-        # voltaje, hay que confirmar que toda la cadena de equipos volvio a
-        # arrancar correctamente.
         _tross_validate_instruments_after_power_cycle()
 
     readings = _measure_rectifier_voltages_with_retry(tross_lease, max_retries=3, retry_wait_seconds=300)
@@ -3438,7 +3074,6 @@ def _tross_stage_voltage_check(tross_lease):
         return
 
     if not awaiting_power_cycle:
-        # --- FASE 1: primera vez que vemos un voltaje bajo ---
         mark_tross_step_completed("tross_voltage_check_awaiting_power_cycle")
         _print_yellow_banner(
             "Se detectaron rectificadores con voltaje DC <= 50V (se esperaba > 50V en TODOS).\n"
@@ -3452,7 +3087,6 @@ def _tross_stage_voltage_check(tross_lease):
         print("[*] Terminando el programa de forma segura antes del power-cycle del rack...")
         sys.exit(0)
 
-    # --- FASE 2: ya se habia pedido un power-cycle antes, y el voltaje SIGUE bajo ---
     print_ascii_fail(
         "El voltaje DC de los rectificadores sigue <= 50V incluso despues del power-cycle "
         "del rack. Se considera que la configuracion del Tross fallo de forma irrecuperable; "
@@ -3473,17 +3107,6 @@ def _tross_stage_voltage_check(tross_lease):
     )
 
 def _tross_stage_voltage_sequence_test(tross_lease):
-    """ETAPA 13/13: prueba funcional de los rectificadores. Baja el voltaje
-    de salida a 45V durante 15 segundos:
-
-        vrmu_util --api="/api/rectifier/outputsequence"
-                   --rectifier_output_sequence="45:100:15"
-
-    (se puede observar el LED de los Jolt100 cambiar de >50V a <50V) y
-    confirma, releyendo dc-voltage, que los rectificadores efectivamente
-    respondieron: se espera que ahora lean entre 40V y 50V (ni sigan en los
-    ~55V de operacion normal -- lo que indicaria que no reaccionaron -- ni
-    caigan a 0/sin lectura)."""
     if is_tross_step_completed("tross_voltage_sequence_tested"):
         print("[=] Etapa 'tross_voltage_sequence_tested' ya fue ejecutada previamente. Omitiendo...")
         return
@@ -3539,11 +3162,6 @@ def _tross_stage_voltage_sequence_test(tross_lease):
     mark_tross_step_completed("tross_voltage_sequence_tested")
 
 def _tross_config_attempt():
-    """Ejecuta las 13 etapas de TROSS_CONFIG en orden. Cada etapa tiene su
-    propia bandera en tross_config.json -- un archivo separado de
-    provisioning_state.json para poder rehacer todo el proceso del Tross
-    borrando solo ese archivo -- por lo que una corrida interrumpida a
-    mitad de camino retoma en la etapa que fallo en vez de repetir todo."""
     print("--- PASO: TROSS_CONFIG - Configuracion automatica del Tross ---")
 
     state = load_state()
@@ -3680,10 +3298,6 @@ def fix_chrome():
     mark_step_completed("fix_chrome")
 
 def _flush_log_to_disk():
-    """Fuerza flush + fsync del archivo de log a disco SIN cerrarlo, para no
-    romper los print() posteriores (sys.stdout/sys.stderr siguen redirigidos
-    al DualLogger). A diferencia de log_final_summary()/logger_instance.close(),
-    esta funcion es segura de llamar en medio de la ejecucion."""
     try:
         logger_instance.logfile.flush()
         os.fsync(logger_instance.logfile.fileno())
@@ -3691,13 +3305,7 @@ def _flush_log_to_disk():
         print(f"[!] Advertencia: no se pudo forzar el fsync del log ({e}).")
 
 def _force_reboot():
-    """Fuerza el reinicio del sistema de forma robusta, con multiples
-    fallbacks. Como el equipo puede empezar a apagarse a mitad de la
-    ejecucion (dejando la sesion/pipe inestable), NINGUNA excepcion de un
-    intento detiene el flujo: se pasa directamente al siguiente metodo.
-    Solo se lanza RuntimeError si absolutamente todos los intentos fallan."""
 
-    # --- Intento 1: reboot interactivo via pexpect (maneja prompt de sudo) ---
     reboot_cmd = "sudo reboot"
     print(f"[CMD Interactive] {reboot_cmd}")
     try:
@@ -3718,7 +3326,6 @@ def _force_reboot():
     except Exception as e:
         print(f"[!] El reinicio via pexpect fallo o la sesion se volvio inestable: {e}")
 
-    # --- Intento 2: fallback directo por subprocess con password pipeada ---
     print("[*] Reintentando el reinicio via fallback (subprocess + sudo -S)...")
     try:
         subprocess.run(f'echo "{SUDO_PASSWORD}" | sudo -S reboot', shell=True, timeout=30)
@@ -3727,7 +3334,6 @@ def _force_reboot():
     except Exception as e:
         print(f"[!] El fallback por subprocess tambien fallo: {e}")
 
-    # --- Intento 3: ultimo recurso, reboot forzado (reboot -f) ---
     print("[*] Ultimo recurso: forzando el reinicio con 'reboot -f'...")
     try:
         subprocess.run(f'echo "{SUDO_PASSWORD}" | sudo -S reboot -f', shell=True, timeout=30)
@@ -3764,14 +3370,6 @@ def end_config_reboot():
 
     mark_step_completed("end_config_reboot")
 
-    # El reboot ahora es OPCIONAL: se recomienda, pero el operador puede
-    # elegir saltarlo (por ejemplo para seguir directo con la configuracion
-    # de Juniper/ZPE/Tross en la misma corrida, sin cortar el proceso). Se
-    # da una ventana de 5 minutos: si se presiona ENTER durante ese tiempo,
-    # se OMITE el reboot y el script continua normalmente; si se agotan los
-    # 5 minutos sin input, se procede con el reboot recomendado (comportamiento
-    # por defecto, para no dejar el rack en un estado a medio configurar por
-    # un operador que se distrajo).
     timeout = 300
     print(f"\nSe RECOMIENDA reiniciar el sistema ahora antes de continuar.")
     print(f"El sistema se reiniciara automaticamente en {timeout // 60} minutos si no se hace nada.")
@@ -3798,9 +3396,6 @@ def end_config_reboot():
         print("\n\n[*] Se omitio el reboot recomendado. Continuando sin reiniciar...")
         return
 
-    # Se hace flush sin cerrar el log (sys.stdout sigue redirigido al
-    # DualLogger); el cierre definitivo queda como ultimo paso, ya con el
-    # reinicio en curso.
     print("\n\n[*] Forzando el flush del log a disco (sin cerrarlo) antes del reboot...")
     _flush_log_to_disk()
 
@@ -3824,6 +3419,7 @@ if __name__ == "__main__":
     run_security_patch()
     validate_and_lego_setup()
     setup_nomachine_yaml()
+    ensure_dhcp()
     run_ansible_playbook()
     provisional_dhcp()
     network_plan()
