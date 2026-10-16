@@ -83,148 +83,6 @@ GPG_KEY_IMPORT_CMD = (
     "sudo gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/google-chrome.gpg"
 )
 
-DHCPD_CONF_CONTENT = """# BEGIN ANSIBLE MANAGED BLOCK
-ddns-update-style none;
-ignore client-updates;
-allow booting;
-allow bootp;
-ddns-updates off;
-default-lease-time 6000;
-max-lease-time 7200;
-authoritative;
-subnet 10.0.0.0 netmask 255.255.0.0 {
-  option subnet-mask 255.255.0.0;
-  option routers 10.0.0.254;
-  option broadcast-address 10.0.255.255;
-  next-server 10.0.0.254;
-
-  filename "http://10.0.0.254:8001/pxelinux.0";
-}
-host izumi-1 { hardware ethernet 98:98:FB:CA:F0:E5; fixed-address 10.0.0.1; }
-host izumi-2 { hardware ethernet 98:98:FB:CA:F1:85; fixed-address 10.0.0.2; }
-host izumi-3 { hardware ethernet 98:98:FB:CB:06:DD; fixed-address 10.0.0.3; }
-host izumi-4 { hardware ethernet 98:98:FB:CB:01:ED; fixed-address 10.0.0.4; }
-host izumi-5 { hardware ethernet 98:98:FB:CA:D6:D5; fixed-address 10.0.0.5; }
-host izumi-6 { hardware ethernet 98:98:FB:D0:DA:05; fixed-address 10.0.0.6; }
-host izumi-7 { hardware ethernet 98:98:FB:CB:06:E5; fixed-address 10.0.0.7; }
-host izumi-8 { hardware ethernet 98:98:FB:C5:98:8D; fixed-address 10.0.0.8; }
-host izumi-9 { hardware ethernet 98:98:FB:CF:26:55; fixed-address 10.0.0.9; }
-host izumi-10 { hardware ethernet 98:98:FB:CB:0D:85; fixed-address 10.0.0.10; }
-host izumi-11 { hardware ethernet 98:98:FB:CF:25:3D; fixed-address 10.0.0.11; }
-host izumi-12 { hardware ethernet 98:98:FB:CA:E6:05; fixed-address 10.0.0.12; }
-host izumi-13 { hardware ethernet 98:98:FB:CB:6E:95; fixed-address 10.0.0.13; }
-host izumi-14 { hardware ethernet 98:98:FB:D0:E7:25; fixed-address 10.0.0.14; }
-host izumi-15 { hardware ethernet 98:98:FB:CA:E5:F5; fixed-address 10.0.0.15; }
-host izumi-16 { hardware ethernet 98:98:FB:C5:33:3D; fixed-address 10.0.0.16; }
-host rj45-switch { hardware ethernet 00:00:00:00:00:00; fixed-address 10.0.0.249; }
-
-# END ANSIBLE MANAGED BLOCK
-host zpe { hardware ethernet e4:1a:2c:02:c3:0c; fixed-address 10.0.0.253; }
-host iboot { hardware ethernet 00:0D:AD:04:92:28; fixed-address 10.0.0.250; }
-host tross { hardware ethernet C0:1C:6A:66:C2:E4; fixed-address 10.0.0.251; }
-  filename "http://10.0.0.254:8001/pxelinux.0";"""
-
-DHCPD6_CONF_CONTENT = """# BEGIN ANSIBLE MANAGED BLOCK
-ddns-update-style none;
-ignore client-updates;
-allow booting;
-allow bootp;
-ddns-updates off;
-default-lease-time 6000;
-max-lease-time 7200;
-authoritative;
-option domain-search-list code 119 = text;
-option dhcp6.bootfile-url code 59 = string;
-option dhcp6.name-servers fd00::9;
-
-subnet6 fd00::/64 {
-range6 fd00::11 fd00::FF;
-option dhcp6.bootfile-url "http://[fd00::9]:8001/diorite/ipxe.cfg";
-log(info, "DHCPv6 - Found other ipv6 client...");
-
-host diorite-1 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:F0:E2;
-log(info, "DHCPv6 - Found Diorite-1 client...");
-fixed-address6 fd00::10;
-}
-host diorite-2 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:F1:82;
-log(info, "DHCPv6 - Found Diorite-2 client...");
-fixed-address6 fd00::11;
-}
-host diorite-3 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:06:DA;
-log(info, "DHCPv6 - Found Diorite-3 client...");
-fixed-address6 fd00::12;
-}
-host diorite-4 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:01:EA;
-log(info, "DHCPv6 - Found Diorite-4 client...");
-fixed-address6 fd00::13;
-}
-host diorite-5 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:D6:D2;
-log(info, "DHCPv6 - Found Diorite-5 client...");
-fixed-address6 fd00::14;
-}
-host diorite-6 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:D0:DA:02;
-log(info, "DHCPv6 - Found Diorite-6 client...");
-fixed-address6 fd00::15;
-}
-host diorite-7 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:06:E2;
-log(info, "DHCPv6 - Found Diorite-7 client...");
-fixed-address6 fd00::16;
-}
-host diorite-8 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:C5:98:8A;
-log(info, "DHCPv6 - Found Diorite-8 client...");
-fixed-address6 fd00::17;
-}
-host diorite-9 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CF:26:52;
-log(info, "DHCPv6 - Found Diorite-9 client...");
-fixed-address6 fd00::18;
-}
-host diorite-10 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:0D:82;
-log(info, "DHCPv6 - Found Diorite-10 client...");
-fixed-address6 fd00::19;
-}
-host diorite-11 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CF:25:3A;
-log(info, "DHCPv6 - Found Diorite-11 client...");
-fixed-address6 fd00::1A;
-}
-host diorite-12 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:E6:02;
-log(info, "DHCPv6 - Found Diorite-12 client...");
-fixed-address6 fd00::1B;
-}
-host diorite-13 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CB:6E:92;
-log(info, "DHCPv6 - Found Diorite-13 client...");
-fixed-address6 fd00::1C;
-}
-host diorite-14 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:D0:E7:22;
-log(info, "DHCPv6 - Found Diorite-14 client...");
-fixed-address6 fd00::1D;
-}
-host diorite-15 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:CA:E5:F2;
-log(info, "DHCPv6 - Found Diorite-15 client...");
-fixed-address6 fd00::1E;
-}
-host diorite-16 {
-host-identifier option dhcp6.client-id  00:03:00:01:98:98:FB:C5:33:3A;
-log(info, "DHCPv6 - Found Diorite-16 client...");
-fixed-address6 fd00::1F;
-}
-}
-# END ANSIBLE MANAGED BLOCK"""
-
 def print_ascii_fail(message="Se detecto un error durante la ejecucion."):
     """Banner compacto de FALLO (rojo). 'message' describe que fallo
     especificamente -- esta funcion se usa desde muchos pasos distintos
@@ -492,6 +350,55 @@ def run_interactive(cmd, timeout=3600):
     if child.exitstatus != 0:
         raise RuntimeError(f"Error en comando interactivo: {cmd} (Exit code: {child.exitstatus})")
     return child.exitstatus
+
+def _set_dhcp_host_mac(host_name, mac, expected_ip, conf_path="/etc/dhcp/dhcpd.conf"):
+    """Actualiza unicamente la MAC de la entrada 'host <host_name> { ... }' en
+    el dhcpd.conf, sin tocar el resto del archivo (indentacion, orden,
+    fixed-address, comentarios ni otras lineas).
+
+    Falla con un error claro si la entrada no existe, si hay mas de una, si
+    el numero de lineas del archivo cambia o si, tras el cambio, la linea no
+    contiene la MAC y la IP esperadas."""
+    host_re = rf"host[[:space:]]+{host_name}[[:space:]]*\{{[[:space:]]*hardware[[:space:]]+ethernet"
+
+    count_res = subprocess.run(
+        ["sudo", "grep", "-cE", host_re, conf_path], capture_output=True, text=True
+    )
+    matches = int(count_res.stdout.strip() or 0)
+    if matches != 1:
+        print_ascii_fail(f"Se esperaba 1 entrada 'host {host_name}' en {conf_path} y hay {matches}.")
+        raise RuntimeError(
+            f"{conf_path} tiene {matches} entradas 'host {host_name} {{ hardware ethernet ... }}' "
+            f"(se esperaba exactamente 1). No se modifico el archivo."
+        )
+
+    lines_before = subprocess.run(
+        ["sudo", "wc", "-l", conf_path], capture_output=True, text=True
+    ).stdout.split()[0]
+
+    sed_cmd = (
+        f"sudo sed -i -E 's/({host_re}[[:space:]]+)[^;]+;/\\1{mac};/' {conf_path}"
+    )
+    run_interactive(sed_cmd)
+
+    lines_after = subprocess.run(
+        ["sudo", "wc", "-l", conf_path], capture_output=True, text=True
+    ).stdout.split()[0]
+    if lines_before != lines_after:
+        print_ascii_fail(f"El numero de lineas de {conf_path} cambio ({lines_before} -> {lines_after}).")
+        raise RuntimeError(f"{conf_path} cambio de {lines_before} a {lines_after} lineas tras actualizar la MAC.")
+
+    check_res = subprocess.run(
+        ["sudo", "grep", "-E", host_re, conf_path], capture_output=True, text=True
+    )
+    host_line = check_res.stdout.strip()
+    if mac.lower() not in host_line.lower() or expected_ip not in host_line:
+        print_ascii_fail(f"La entrada 'host {host_name}' no quedo con la MAC/IP esperadas.")
+        raise RuntimeError(
+            f"Tras actualizar, la entrada de '{host_name}' es: '{host_line}' "
+            f"(se esperaba MAC {mac} e IP {expected_ip})."
+        )
+    print(f"[✓] {host_line}")
 
 def _retry_download(fn, description, max_retries=3, base_delay=10):
     """Reintenta con backoff exponencial una operacion de descarga/red
@@ -970,26 +877,25 @@ def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_tim
 
 
 def ensure_dhcp():
-    """Descarga dhcpd.conf y dhcpd6.conf de referencia desde 172.24.125.136,
-    los instala en /etc/dhcp/ y reinicia los servicios DHCP (IPv4 e IPv6).
-    Corre antes de run_ansible_playbook() para que el servidor DHCP local
-    quede con la configuracion correcta desde el arranque del provisioning."""
+    """Verifica que dhcpd.conf y dhcpd6.conf existan en /etc/dhcp/ y reinicia
+    los servicios DHCP (IPv4 e IPv6). Corre antes de run_ansible_playbook()."""
     if is_step_completed("ensure_dhcp"):
         print("[=] Paso 'ensure_dhcp' ya fue ejecutado previamente. Omitiendo...")
         return
     print("--- PASO: Asegurar configuracion de DHCP ---")
 
-    _scp_download("testusr", "172.24.125.136", "/etc/dhcp/dhcpd.conf", ".")
-    _scp_download("testusr", "172.24.125.136", "/etc/dhcp/dhcpd6.conf", ".")
+    for conf_path in ("/etc/dhcp/dhcpd.conf", "/etc/dhcp/dhcpd6.conf"):
+        if not os.path.isfile(conf_path):
+            print_ascii_fail(f"No existe '{conf_path}'.")
+            raise RuntimeError(f"No se encontro '{conf_path}'. Verifica la configuracion de DHCP.")
+        print(f"[✓] {conf_path} presente.")
 
     _run_shell_sequence([
-        "sudo mv dhcpd.conf /etc/dhcp/",
-        "sudo mv dhcpd6.conf /etc/dhcp/",
         "sudo systemctl restart isc-dhcp-server",
         "sudo systemctl restart isc-dhcp-server6",
     ])
 
-    print("[✓] Configuracion de DHCP actualizada y servicios reiniciados.")
+    print("[✓] Archivos DHCP verificados y servicios reiniciados.")
     mark_step_completed("ensure_dhcp")
 
 def run_ansible_playbook():
@@ -1106,25 +1012,29 @@ def run_ansible_playbook():
     time.sleep(15)
 
 def provisional_dhcp():
+    """Descarga dhcpd.conf y dhcpd6.conf desde 172.24.125.136:/etc/dhcp/ al
+    home del usuario, los mueve a /etc/dhcp/ y reinicia los servicios DHCP
+    (IPv4 e IPv6)."""
     if is_step_completed("provisional_dhcp"):
         print("[=] Paso 'provisional_dhcp' ya fue ejecutado previamente. Omitiendo...")
         return
 
-    print("--- PASO 9: Configuracion de Archivos DHCP Provisionales ---")
+    print("--- PASO 9: Configuracion de Archivos DHCP ---")
 
-    print("[*] Creando /etc/dhcp/dhcpd.conf...")
-    cmd_dhcpd = f"echo '{DHCPD_CONF_CONTENT}' | sudo tee /etc/dhcp/dhcpd.conf > /dev/null"
-    run_interactive(cmd_dhcpd)
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    home_dir = f"/home/{sudo_user}"
 
-    print("[*] Creando /etc/dhcp/dhcpd6.conf...")
-    cmd_dhcpd6 = f"echo '{DHCPD6_CONF_CONTENT}' | sudo tee /etc/dhcp/dhcpd6.conf > /dev/null"
-    run_interactive(cmd_dhcpd6)
+    _scp_download("testusr", "172.24.125.136", "/etc/dhcp/dhcpd.conf", home_dir)
+    _scp_download("testusr", "172.24.125.136", "/etc/dhcp/dhcpd6.conf", home_dir)
 
-    print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
-    run_interactive("sudo systemctl restart isc-dhcp-server")
-    run_interactive("sudo systemctl restart isc-dhcp-server6")
+    _run_shell_sequence([
+        f"sudo mv {home_dir}/dhcpd.conf /etc/dhcp/",
+        f"sudo mv {home_dir}/dhcpd6.conf /etc/dhcp/",
+        "sudo systemctl restart isc-dhcp-server",
+        "sudo systemctl restart isc-dhcp-server6",
+    ])
 
-    print("[✓] Archivos DHCP creados y servicios reiniciados exitosamente en /etc/dhcp/.")
+    print("[✓] Archivos DHCP instalados en /etc/dhcp/ y servicios reiniciados.")
     print("[*] Esperando 15 segundos...")
     time.sleep(15)
 
@@ -1947,15 +1857,7 @@ def zpe_config():
 
     # --- PASO F: Actualizar /etc/dhcp/dhcpd.conf con la MAC real del ZPE ---
     print("[*] Actualizando /etc/dhcp/dhcpd.conf con la MAC real del ZPE...")
-    new_line = f"host zpe {{ hardware ethernet {zpe_mac}; fixed-address 10.0.0.253; }}"
-    sed_cmd = (
-        "sudo sed -i '/host zpe { hardware ethernet/c\\"
-        f"{new_line}' /etc/dhcp/dhcpd.conf"
-    )
-    run_interactive(sed_cmd)
-
-    print("[*] Verificando que la MAC se haya aplicado correctamente...")
-    run_interactive(f"sudo grep -q '{zpe_mac}' /etc/dhcp/dhcpd.conf")
+    _set_dhcp_host_mac("zpe", zpe_mac, "10.0.0.253")
 
     print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
     run_interactive("sudo systemctl restart isc-dhcp-server")
@@ -2198,15 +2100,7 @@ def tross_capture_mac():
 
     # --- Actualizar /etc/dhcp/dhcpd.conf con la MAC real del Tross ---
     print("[*] Actualizando /etc/dhcp/dhcpd.conf con la MAC real del Tross...")
-    new_line = f"host tross {{ hardware ethernet {tross_mac}; fixed-address 10.0.0.251; }}"
-    sed_cmd = (
-        "sudo sed -i '/host tross { hardware ethernet/c\\"
-        f"{new_line}' /etc/dhcp/dhcpd.conf"
-    )
-    run_interactive(sed_cmd)
-
-    print("[*] Verificando que la MAC se haya aplicado correctamente...")
-    run_interactive(f"sudo grep -q '{tross_mac}' /etc/dhcp/dhcpd.conf")
+    _set_dhcp_host_mac("tross", tross_mac, "10.0.0.251")
 
     print("[✓] MAC del Tross capturada y aplicada exitosamente.")
 
@@ -2797,13 +2691,7 @@ def _tross_stage_dhcp(tross_mac):
     print("--- ETAPA 1/13: Aplicar la MAC del Tross en /etc/dhcp/dhcpd.conf ---")
 
     print(f"[*] Asegurando que /etc/dhcp/dhcpd.conf tenga la MAC del Tross ({tross_mac})...")
-    new_line = f"host tross {{ hardware ethernet {tross_mac}; fixed-address 10.0.0.251; }}"
-    sed_cmd = (
-        "sudo sed -i '/host tross { hardware ethernet/c\\"
-        f"{new_line}' /etc/dhcp/dhcpd.conf"
-    )
-    run_interactive(sed_cmd)
-    run_interactive(f"sudo grep -q '{tross_mac}' /etc/dhcp/dhcpd.conf")
+    _set_dhcp_host_mac("tross", tross_mac, "10.0.0.251")
 
     print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
     run_interactive("sudo systemctl restart isc-dhcp-server")
@@ -3548,13 +3436,36 @@ def _tross_stage_voltage_sequence_test(tross_lease):
     )
 
     print("[*] Verificando que el voltaje DC haya caido al rango esperado (>40V y <50V)...")
-    dc_output, _ = _run_local_cmd_with_wait(
-        dc_voltage_cmd, max_wait_seconds=60, poll_interval=5,
-        label="Verificando dc-voltage tras la secuencia"
-    )
+    time.sleep(1)
 
-    readings = _parse_rectifier_voltages(dc_output)
-    if not readings:
+    # En campo se confirmo que la caida de voltaje es breve (aprox. 2-6s,
+    # no los 15s que sugiere el nombre del parametro) y que los 23
+    # rectificadores no caen ni se recuperan de forma simultanea. Una sola
+    # lectura puntual puede caer justo antes de que arranque el dip o
+    # cuando algunos ya se estan recuperando. Por eso se sondea varias
+    # veces durante la ventana activa y se evalua cada rectificador por su
+    # lectura minima observada, no por una coincidencia simultanea entre
+    # los 23.
+    poll_window_seconds = 8
+    poll_interval_seconds = 1
+    min_voltage_by_device = {}
+    elapsed = 0
+    while True:
+        dc_output, _ = _run_local_cmd_with_wait(
+            dc_voltage_cmd, max_wait_seconds=60, poll_interval=5,
+            label=f"Verificando dc-voltage (t={elapsed}s de {poll_window_seconds}s)"
+        )
+        readings = _parse_rectifier_voltages(dc_output)
+        for device_name, voltage in readings:
+            previous = min_voltage_by_device.get(device_name)
+            if previous is None or voltage < previous:
+                min_voltage_by_device[device_name] = voltage
+        if elapsed >= poll_window_seconds:
+            break
+        time.sleep(poll_interval_seconds)
+        elapsed += poll_interval_seconds
+
+    if not min_voltage_by_device:
         print_ascii_fail(
             "No se encontro ninguna lectura de dc-voltage tras la secuencia de prueba."
         )
@@ -3562,12 +3473,12 @@ def _tross_stage_voltage_sequence_test(tross_lease):
             "No se pudieron obtener lecturas de dc-voltage tras la secuencia de voltaje."
         )
 
-    print("[*] Lecturas de voltaje DC tras la secuencia:")
-    for device_name, voltage in readings:
+    print("[*] Lectura minima de voltaje DC observada por rectificador durante la ventana:")
+    for device_name, voltage in min_voltage_by_device.items():
         marker = "✓" if 40 < voltage < 50 else "✗"
         print(f"    [{marker}] {device_name}: {voltage} V")
 
-    all_in_range = all(40 < voltage < 50 for _, voltage in readings)
+    all_in_range = all(40 < voltage < 50 for voltage in min_voltage_by_device.values())
     if not all_in_range:
         print_ascii_fail(
             "No todos los rectificadores cayeron al rango esperado (>40V y <50V) tras la "
