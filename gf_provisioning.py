@@ -12,6 +12,7 @@ import atexit
 import uuid
 import getpass
 import threading
+import collections
 
 # ==============================================================================
 # CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
@@ -99,7 +100,7 @@ def print_ascii_fail(message="Se detecto un error durante la ejecucion."):
         print(f"{red}│ {line[:width-2].ljust(width-2)} │{reset}")
     print(f"{red}└{'─' * width}┘{reset}\n")
 
-def print_ascii_pass(message="Mirror de apt + Ansible Playbook: OK."):
+def print_ascii_pass(message="apt + Ansible Playbook: OK."):
     """Banner compacto de EXITO (verde). Se usa tras confirmar que tanto
     el pre-flight de apt/mirror como el ansible-playbook terminaron sin
     tareas fallidas."""
@@ -399,6 +400,32 @@ def start_sudo_keepalive(interval=60):
     t.start()
     atexit.register(_sudo_keepalive_stop.set)
 
+# sudo guarda la sesion POR TERMINAL: cada comando que se abre con pexpect
+# corre en una terminal nueva y volveria a pedir la contrasena. Por eso a
+# esos comandos se les antepone esto: activa sudo en esa terminal con la
+# contrasena (pasada por una variable de entorno que se borra enseguida y
+# nunca aparece en la linea de comandos) antes de correr el comando.
+_SUDO_PRIME = ('printf \'%s\\n\' "$GF_SUDO_PW" | sudo -S -p "" -v >/dev/null 2>&1; '
+               'unset GF_SUDO_PW; ')
+
+
+def _sudo_env():
+    env = os.environ.copy()
+    if SUDO_PASSWORD and not _is_root():
+        env["GF_SUDO_PW"] = SUDO_PASSWORD
+    return env
+
+
+def _spawn_bash(cmd, **kwargs):
+    """pexpect.spawn('bash -c cmd') con sudo ya activo dentro de la nueva
+    terminal, para que los 'sudo' del comando (o de los scripts que llama)
+    no vuelvan a pedir contrasena. Si aun asi apareciera un prompt, los
+    llamadores lo siguen contestando solos."""
+    if SUDO_PASSWORD and not _is_root():
+        return pexpect.spawn("bash", ["-c", _SUDO_PRIME + cmd], env=_sudo_env(), **kwargs)
+    return pexpect.spawn("bash", ["-c", cmd], **kwargs)
+
+
 def run_command(cmd, check=True):
     print(f"[CMD] {cmd}")
     res = subprocess.run(cmd, shell=True, stderr=subprocess.PIPE, text=True)
@@ -414,7 +441,7 @@ def run_command(cmd, check=True):
 
 def run_interactive(cmd, timeout=3600):
     print(f"[CMD Interactive] {cmd}")
-    child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=timeout)
+    child = _spawn_bash(cmd, encoding="utf-8", timeout=timeout)
     child.logfile_read = sys.stdout
 
     while True:
@@ -791,9 +818,14 @@ def setup_nomachine_yaml():
     print(f"[✓] Archivo {yaml_path} actualizado exitosamente.")
     mark_step_completed("setup_nomachine_yaml", {"nomachine_url": nomachine_url})
 
-# Mirrors ALTERNOS. Solo se usan si el comando de apt falla con los sources
-# que el sistema ya tiene configurados (los "default"). Se prueban en orden.
-# Si tu org tiene un mirror interno/propio, ponlo primero en esta lista.
+# ==============================================================================
+# APT: SIEMPRE PRIMERO CON LOS SOURCES DEFAULT; MIRRORS ALTERNOS SOLO SI FALLA
+# ==============================================================================
+# Mirrors ALTERNOS, en orden. Solo se usan si el comando de apt falla con los
+# sources default del sistema (/etc/apt/sources.list tal como lo dejo la
+# instalacion de Ubuntu). Un mirror que ya es parte de los default (por
+# ejemplo us.archive.ubuntu.com en equipos instalados en EE.UU.) se salta,
+# porque ya se probo. Si tu org tiene un mirror interno/propio, ponlo primero.
 APT_CANDIDATE_MIRRORS = [
     "http://us.archive.ubuntu.com/ubuntu/",
     "http://archive.ubuntu.com/ubuntu/",
@@ -803,66 +835,210 @@ APT_CANDIDATE_MIRRORS = [
 ]
 
 APT_SOURCES_FILE = "/etc/apt/sources.list"
+# Copia del sources.list DEFAULT. Se crea la primera vez que hace falta
+# cambiar a un mirror alterno (las versiones anteriores del script tambien
+# la creaban), y sirve para volver siempre a los sources default.
 APT_SOURCES_BACKUP = "/etc/apt/sources.list.bak-provisioning"
 
+# apt-get sin preguntas: -q (salida limpia para el log), -y, dpkg conserva
+# los archivos de configuracion existentes sin preguntar (si no, un
+# dist-upgrade se puede quedar esperando una respuesta que nadie ve) y espera
+# hasta 5 min si otro apt/unattended-upgrades tiene el lock, en vez de fallar.
+APT_GET = (
+    "sudo DEBIAN_FRONTEND=noninteractive apt-get -q -y "
+    "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "
+    "-o DPkg::Lock::Timeout=300"
+)
 
-def _probe_mirror(mirror_url, connect_timeout=15):
-    """HEAD request rapido para saber si el mirror responde antes de
-    perder tiempo reescribiendo sources.list y corriendo apt."""
-    probe = subprocess.run(
-        f'curl -s -o /dev/null -w "%{{http_code}}" --max-time {connect_timeout} {mirror_url}',
-        shell=True, capture_output=True, text=True
-    )
-    http_code = probe.stdout.strip()
-    return probe.returncode == 0 and http_code.startswith(("2", "3")), http_code
+# URL de un repo de Ubuntu dentro de sources.list (con o sin '/' final y con
+# hasta un segmento extra como /pub/ubuntu/). Excluye PPAs de Launchpad.
+_UBUNTU_URL_RE = re.compile(
+    r"https?://((?!ppa\.)[A-Za-z0-9.-]+)(?:/[A-Za-z0-9._-]+)?/ubuntu/?(?=\s)"
+)
+# Regex exacta con la que las versiones anteriores del script reescribian
+# sources.list. Sirve para reconocer un sources.list que quedo apuntando a
+# un mirror alterno desde una corrida anterior.
+_LEGACY_UBUNTU_URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+/ubuntu/")
 
-
-def _backup_sources_list_once():
-    if not os.path.exists(APT_SOURCES_BACKUP):
-        subprocess.run(f"sudo cp {APT_SOURCES_FILE} {APT_SOURCES_BACKUP}", shell=True, check=False)
-
-
-def _restore_sources_list():
-    if os.path.exists(APT_SOURCES_BACKUP):
-        subprocess.run(f"sudo cp {APT_SOURCES_BACKUP} {APT_SOURCES_FILE}", shell=True, check=False)
-
-
-def _point_sources_list_to_mirror(mirror_url):
-    """Reemplaza cualquier host de archive.ubuntu.com en sources.list por
-    el mirror dado, para que cualquier llamada posterior a apt (incluida
-    la de Ansible, que lee el mismo sources.list) use el mismo mirror que
-    ya comprobamos que funciona."""
-    sed_cmd = (
-        r"sudo sed -i -E "
-        r"'s#https?://[a-zA-Z0-9.-]+/ubuntu/#" + mirror_url.replace("/", r"\/") + r"#g' "
-        + APT_SOURCES_FILE
-    )
-    subprocess.run(sed_cmd, shell=True, check=False)
+# Lineas de apt-get update que indican que un repo no se pudo descargar.
+_APT_FETCH_FAIL_RE = re.compile(r"^\s*(?:Err:\d+|[WE]: Failed to fetch)\s+(\S+)", re.M)
+# Errores de red/mirror (cambiar de mirror o reintentar si puede ayudar).
+# Cualquier otro error (paquete inexistente, dependencias rotas, etc.) se
+# reporta de inmediato, porque otro mirror no lo arregla.
+_APT_NETWORK_ERR_RE = re.compile(
+    r"Failed to fetch|Hash Sum mismatch|Temporary failure resolving|Could not resolve|"
+    r"Could not connect|Connection failed|Unable to connect|Connection timed out|"
+    r"Undetermined Error|403\s+Forbidden|Could not get lock|Unable to acquire the dpkg",
+    re.I,
+)
 
 
-def _run_apt_attempts(apt_command, description, label, max_retries, base_delay):
-    """Corre 'apt-get update' + 'apt_command' con los sources tal como esten
-    en ese momento, hasta 'max_retries' veces con backoff exponencial.
-    'label' solo se usa en los logs (p.ej. 'sources default' o la URL del
-    mirror). Devuelve True si ambos comandos terminaron con rc=0."""
+class AptNonNetworkError(RuntimeError):
+    """Fallo de apt que no es de red/mirror (no tiene caso probar mirrors)."""
+
+
+def _url_host(url):
+    return re.sub(r"^https?://", "", url).split("/", 1)[0]
+
+
+def _ubuntu_hosts(sources_text):
+    """Hosts de repos de Ubuntu usados en un sources.list (sin comentarios)."""
+    hosts = set()
+    for line in (sources_text or "").splitlines():
+        if line.strip().startswith("#"):
+            continue
+        hosts.update(m.group(1) for m in _UBUNTU_URL_RE.finditer(line + " "))
+    return hosts
+
+
+def _read_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+    except PermissionError:
+        res = subprocess.run(["sudo", "-n", "cat", path], capture_output=True)
+        return res.stdout.decode("utf-8", "surrogateescape") if res.returncode == 0 else None
+
+
+def _sudo_write_file(path, text):
+    _activate_sudo()
+    res = subprocess.run(["sudo", "-n", "tee", path],
+                         input=text.encode("utf-8", "surrogateescape"),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if res.returncode != 0:
+        raise RuntimeError(f"No se pudo escribir {path}: "
+                           f"{res.stderr.decode('utf-8', 'replace').strip()}")
+
+
+def _sources_pointing_to_mirror(sources_text, mirror_url):
+    return _UBUNTU_URL_RE.sub(lambda _m: mirror_url, sources_text)
+
+
+def _previous_mirror_rewrite(current, original):
+    """Si 'current' es exactamente 'original' reescrito a uno de los mirrors
+    alternos (por esta version del script o por una anterior), devuelve ese
+    mirror. Si no, None."""
+    if current == original:
+        return None
+    for mirror_url in APT_CANDIDATE_MIRRORS:
+        for rx in (_UBUNTU_URL_RE, _LEGACY_UBUNTU_URL_RE):
+            if rx.sub(lambda _m, m=mirror_url: m, original) == current:
+                return mirror_url
+    return None
+
+
+def restore_default_apt_sources():
+    """Deja /etc/apt/sources.list con los sources DEFAULT y devuelve su texto.
+
+    Las versiones anteriores del script (y el fallback de esta misma version)
+    dejaban sources.list apuntando a un mirror alterno, asi que las
+    siguientes llamadas a apt iban a ese mirror primero. Si sources.list es
+    exactamente el default reescrito a uno de los mirrors, se restaura el
+    default desde APT_SOURCES_BACKUP. Si cambio por otra razon (por ejemplo
+    'add-apt-repository'), ese cambio se respeta y pasa a ser el default.
+    """
+    current = _read_text(APT_SOURCES_FILE)
+    if current is None:
+        return None
+    original = _read_text(APT_SOURCES_BACKUP)
+    if original is None or original == current:
+        return current
+
+    mirror_url = _previous_mirror_rewrite(current, original)
+    if mirror_url:
+        print(f"[*] sources.list seguia apuntando al mirror alterno {mirror_url} "
+              f"(lo dejo una corrida anterior). Restaurando los sources default...")
+        _sudo_write_file(APT_SOURCES_FILE, original)
+        return original
+
+    mirror_hosts = {_url_host(m) for m in APT_CANDIDATE_MIRRORS}
+    introduced = (_ubuntu_hosts(current) - _ubuntu_hosts(original)) & mirror_hosts
+    if introduced:
+        print(f"[!] sources.list usa {', '.join(sorted(introduced))}, que no esta en el "
+              f"respaldo de los sources default ({APT_SOURCES_BACKUP}), y ademas tiene "
+              f"otros cambios. No se toca; revisalo a mano si no es lo que quieres.")
+        return current
+
+    # Cambio legitimo (no es un mirror nuestro): pasa a ser el nuevo default.
+    _sudo_write_file(APT_SOURCES_BACKUP, current)
+    return current
+
+
+def _run_live(cmd, tail_lines=40):
+    """Corre 'cmd' mostrando su salida EN VIVO (terminal + log), sin leer
+    nada del teclado. Devuelve (returncode, salida). Con tail_lines=None
+    devuelve toda la salida; si no, solo las ultimas 'tail_lines' lineas."""
+    proc = subprocess.Popen(cmd, shell=True, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace", bufsize=1)
+    lines = collections.deque(maxlen=tail_lines)
+    for line in proc.stdout:
+        line = line.rstrip("\n")
+        print(f"    {line}")
+        lines.append(line)
+    return proc.wait(), "\n".join(lines)
+
+
+def _run_apt_cmd(cmd):
+    """Corre un comando de apt con salida en vivo. Si dpkg quedo a medias
+    (por ejemplo por un Ctrl+C durante una instalacion anterior), lo repara
+    con 'dpkg --configure -a' y vuelve a correr el comando una vez."""
+    rc, tail = _run_live(cmd)
+    if rc != 0 and "dpkg was interrupted" in tail:
+        print("[!] dpkg quedo interrumpido en una corrida anterior. "
+              "Reparando con 'dpkg --configure -a'...")
+        _activate_sudo()
+        _run_live("sudo DEBIAN_FRONTEND=noninteractive dpkg --configure -a "
+                  "--force-confdef --force-confold")
+        rc, tail = _run_live(cmd)
+    return rc, tail
+
+
+def _apt_update_result(rc, output, ubuntu_hosts):
+    """'ok', 'network' (fallo algun repo de Ubuntu: reintentar o cambiar de
+    mirror) o 'other' (error que otro mirror no arregla). Los avisos de
+    repos que no son de Ubuntu (p.ej. una llave vencida de Google) no
+    cuentan como fallo si apt-get termino bien."""
+    failed_hosts = {_url_host(url) for url in _APT_FETCH_FAIL_RE.findall(output)}
+    if failed_hosts & set(ubuntu_hosts):
+        return "network"
+    if rc == 0:
+        return "ok"
+    return "network" if _APT_NETWORK_ERR_RE.search(output) and not failed_hosts else "other"
+
+
+def _run_apt_attempts(apt_command, description, label, max_retries, base_delay, ubuntu_hosts):
+    """Corre 'apt-get update' y luego 'apt_command' (si no es None) con los
+    sources tal como esten, hasta 'max_retries' veces con backoff. Devuelve
+    True si todo salio bien, False si fallo por red/mirror. Lanza
+    AptNonNetworkError si el fallo no es de red (otro mirror no lo arregla)."""
     for attempt in range(1, max_retries + 1):
+        _activate_sudo()
         print(f"[*] apt-get update ({label}, intento {attempt}/{max_retries})...")
-        update_res = subprocess.run("sudo apt-get update", shell=True, capture_output=True, text=True)
-
-        if update_res.returncode != 0:
-            print(f"[!] 'apt-get update' fallo (rc={update_res.returncode}). "
-                  f"stderr: {update_res.stderr.strip()[:300]}")
-        elif apt_command == "true":
-            print(f"[✓] '{description}' completado correctamente ({label}).")
+        rc, out = _run_live(f"{APT_GET} update", tail_lines=None)
+        result = _apt_update_result(rc, out, ubuntu_hosts)
+        if result == "other":
+            raise AptNonNetworkError(
+                f"'apt-get update' fallo (rc={rc}) por un problema que no es de red ni de "
+                f"mirror (revisa los repos/llaves en el log de arriba).")
+        if result == "network":
+            print(f"[!] 'apt-get update' no pudo descargar los repos de Ubuntu ({label}).")
+        elif apt_command is None:
+            print(f"[✓] 'apt-get update' completado correctamente ({label}).")
             return True
         else:
             print(f"[*] {description} ({label}, intento {attempt}/{max_retries})...")
-            cmd_res = subprocess.run(apt_command, shell=True, capture_output=True, text=True)
-            if cmd_res.returncode == 0:
+            rc, tail = _run_apt_cmd(apt_command)
+            if rc == 0:
                 print(f"[✓] '{description}' completado correctamente ({label}).")
                 return True
-            print(f"[!] '{description}' fallo (rc={cmd_res.returncode}). "
-                  f"stderr: {cmd_res.stderr.strip()[:500]}")
+            if not _APT_NETWORK_ERR_RE.search(tail):
+                raise AptNonNetworkError(
+                    f"'{description}' fallo (rc={rc}) por un problema que no es de red ni de "
+                    f"mirror; cambiar de mirror no lo arregla. Ultimas lineas:\n{tail[-1500:]}")
+            print(f"[!] '{description}' fallo por red ({label}, rc={rc}).")
 
         if attempt < max_retries:
             delay = base_delay * (2 ** (attempt - 1))
@@ -871,120 +1047,144 @@ def _run_apt_attempts(apt_command, description, label, max_retries, base_delay):
     return False
 
 
+def _probe_mirror(mirror_url, connect_timeout=15):
+    """HEAD request rapido para saber si el mirror responde antes de
+    perder tiempo reescribiendo sources.list y corriendo apt."""
+    probe = subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+         "--max-time", str(connect_timeout), mirror_url],
+        capture_output=True, text=True
+    )
+    http_code = probe.stdout.strip()
+    return probe.returncode == 0 and http_code.startswith(("2", "3")), http_code
+
+
 def _apt_with_mirror_fallback(apt_command, description, max_retries_per_mirror=2,
                                base_delay=10, connect_timeout=15, max_retries_default=2):
-    """Nucleo generico de 'ejecutar un comando de apt, y solo si falla,
-    probar mirrors alternos'. Usado por apt_update()/apt_install() (para
-    cualquier paso del script que necesite instalar paquetes) y por
-    ensure_apt_mirror_ready() (el pre-flight del dist-upgrade antes de
-    Ansible).
+    """Nucleo de TODAS las llamadas a apt que descargan algo (apt_update,
+    apt_install y el dist-upgrade previo a Ansible).
 
-    Fase 1 (default): corre 'apt-get update' + 'apt_command' tal cual,
-    SIN tocar /etc/apt/sources.list, con 'max_retries_default' reintentos.
-    Si funciona, termina aqui y nunca se toca ningun mirror.
+    Fase 1 (default): restaura los sources default si una corrida anterior
+    los dejo en un mirror, y corre 'apt-get update' + 'apt_command' SIN
+    tocar sources.list. Si funciona, termina aqui.
 
-    Fase 2 (fallback): solo si la fase 1 fallo. Respalda sources.list y
-    prueba uno por uno los mirrors de APT_CANDIDATE_MIRRORS (apuntando
-    sources.list a cada uno), con 'max_retries_per_mirror' reintentos
-    cada uno. El primer mirror que funcione se queda configurado para que
-    los pasos siguientes (y Ansible) lo usen.
+    Fase 2 (fallback): solo si la fase 1 fallo por red. Prueba uno por uno
+    los mirrors de APT_CANDIDATE_MIRRORS (reescribiendo sources.list a partir
+    de los default). El primero que funcione se queda en sources.list para
+    lo que sigue (Ansible incluido) hasta la siguiente llamada a apt, que
+    vuelve a empezar por los default.
 
-    Devuelve "default" si funciono con los sources originales, o el
-    mirror_url que funciono. Lanza RuntimeError si todo falla (y en ese
-    caso restaura el sources.list original).
+    Devuelve "default" o el mirror que funciono. Lanza RuntimeError si todo
+    falla (y deja los sources default).
     """
-    # --- Fase 1: sources default, sin tocar sources.list ---
-    print(f"[*] '{description}': intentando primero con los sources default del sistema...")
+    default_text = restore_default_apt_sources()
+    default_hosts = _ubuntu_hosts(default_text)
+    print(f"[*] '{description}': usando los sources default del sistema "
+          f"({', '.join(sorted(default_hosts)) or 'sin repos de Ubuntu en sources.list'})...")
     if _run_apt_attempts(apt_command, description, "sources default",
-                         max_retries_default, base_delay):
+                         max_retries_default, base_delay, default_hosts):
         return "default"
 
-    # --- Fase 2: fallback a mirrors alternos ---
-    print(f"[!] '{description}' fallo con los sources default. "
-          f"Cambiando a mirrors alternos...")
-    _backup_sources_list_once()
+    if not default_hosts:
+        raise RuntimeError(f"'{description}' fallo y {APT_SOURCES_FILE} no tiene repos de "
+                           f"Ubuntu que se puedan cambiar a un mirror alterno.")
 
-    for mirror_url in APT_CANDIDATE_MIRRORS:
-        print(f"[*] Probando mirror: {mirror_url}")
-        reachable, http_code = _probe_mirror(mirror_url, connect_timeout)
+    print(f"[!] '{description}' fallo con los sources default. Probando mirrors alternos...")
+    if _read_text(APT_SOURCES_BACKUP) is None:
+        _sudo_write_file(APT_SOURCES_BACKUP, default_text)
 
-        if not reachable:
-            print(f"[!] Mirror no respondio (HTTP '{http_code}'). Probando el siguiente...")
-            continue
+    try:
+        for mirror_url in APT_CANDIDATE_MIRRORS:
+            host = _url_host(mirror_url)
+            if host in default_hosts:
+                print(f"[=] {mirror_url} ya es parte de los sources default (ya se probo). Siguiente...")
+                continue
+            print(f"[*] Probando mirror alterno: {mirror_url}")
+            reachable, http_code = _probe_mirror(mirror_url, connect_timeout)
+            if not reachable:
+                print(f"[!] El mirror no respondio (HTTP '{http_code}'). Probando el siguiente...")
+                continue
 
-        print(f"[✓] Mirror respondio HTTP {http_code}. Apuntando sources.list a este mirror...")
-        _point_sources_list_to_mirror(mirror_url)
+            _sudo_write_file(APT_SOURCES_FILE, _sources_pointing_to_mirror(default_text, mirror_url))
+            if _run_apt_attempts(apt_command, description, f"mirror={mirror_url}",
+                                 max_retries_per_mirror, base_delay, {host}):
+                print(f"[*] sources.list queda en {mirror_url} hasta la siguiente llamada a apt "
+                      f"(que vuelve a intentar primero con los default).")
+                return mirror_url
+            print(f"[!] {mirror_url} agoto sus reintentos para '{description}'. Probando el siguiente...")
+    except BaseException:
+        _sudo_write_file(APT_SOURCES_FILE, default_text)
+        raise
 
-        if _run_apt_attempts(apt_command, description, f"mirror={mirror_url}",
-                             max_retries_per_mirror, base_delay):
-            return mirror_url
-
-        print(f"[!] {mirror_url} agoto sus reintentos para '{description}'. Probando el siguiente mirror...")
-
-    _restore_sources_list()
+    _sudo_write_file(APT_SOURCES_FILE, default_text)
     raise RuntimeError(
         f"No se pudo completar '{description}' ni con los sources default ni con "
-        f"ninguno de los mirrors alternos ({', '.join(APT_CANDIDATE_MIRRORS)}). "
-        f"Se restauro el sources.list original. Verifica la conectividad de red "
-        f"del host o agrega un mirror interno confiable al inicio de "
-        f"APT_CANDIDATE_MIRRORS."
+        f"los mirrors alternos ({', '.join(APT_CANDIDATE_MIRRORS)}). Se dejaron los "
+        f"sources default. Verifica la red del equipo o agrega un mirror interno "
+        f"confiable al inicio de APT_CANDIDATE_MIRRORS."
     )
 
 
 def apt_update():
     """'apt-get update': primero con los sources default y, solo si falla,
-    con mirrors alternos. Usar SIEMPRE en vez de
-    'run_interactive(\"sudo apt update\")' / 'sudo apt-get update' sueltos."""
-    return _apt_with_mirror_fallback("true", "apt-get update")
+    con mirrors alternos. Usar SIEMPRE en vez de 'sudo apt update' suelto."""
+    return _apt_with_mirror_fallback(None, "apt-get update")
 
 
 def apt_install(pkgs, update=True):
-    """Instala uno o mas paquetes: primero con los sources default y, solo
-    si falla, con mirrors alternos. 'pkgs' puede ser un string
-    ('git curl') o una lista (['git', 'curl']). Usar SIEMPRE en vez de
-    'run_interactive(\"sudo apt install -y ...\")' suelto.
+    """Instala uno o mas paquetes ('git curl' o ['git', 'curl']): primero
+    con los sources default y, solo si falla por red, con mirrors alternos.
+    Usar SIEMPRE en vez de 'sudo apt install -y ...' suelto.
 
-    Con update=True (default) corre 'apt-get update' antes de instalar, en
-    la misma pasada (necesario, por ejemplo, justo despues de agregar un
-    repo nuevo como el de Chrome).
+    Con update=True (default) corre 'apt-get update' antes de instalar
+    (necesario, por ejemplo, justo despues de agregar un repo nuevo).
     """
     pkgs_str = pkgs if isinstance(pkgs, str) else " ".join(pkgs)
-    install_cmd = f"sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {pkgs_str}"
+    install_cmd = f"{APT_GET} install {pkgs_str}"
+    description = f"apt-get install {pkgs_str}"
 
     if update:
-        return _apt_with_mirror_fallback(install_cmd, f"apt-get install -y {pkgs_str}")
+        return _apt_with_mirror_fallback(install_cmd, description)
 
-    # Sin update explicito: intentamos el install directo con lo que ya
-    # este configurado. Si falla, recurrimos al flujo completo
-    # (update + install, default y luego mirrors alternos).
-    print(f"[*] apt-get install -y {pkgs_str} (sin update previo)...")
-    res = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
-    if res.returncode == 0:
-        print(f"[✓] apt-get install -y {pkgs_str} completado.")
+    # Sin update previo: install directo con lo que ya este configurado. Si
+    # falla por red, pasa al flujo completo (update + install, default y
+    # luego mirrors alternos).
+    _activate_sudo()
+    print(f"[*] {description} (sin update previo)...")
+    rc, tail = _run_apt_cmd(install_cmd)
+    if rc == 0:
+        print(f"[✓] {description} completado.")
         return "default"
-    print(f"[!] 'apt-get install -y {pkgs_str}' fallo sin update: {res.stderr.strip()[:300]}")
-    return _apt_with_mirror_fallback(install_cmd, f"apt-get install -y {pkgs_str}")
+    if not _APT_NETWORK_ERR_RE.search(tail):
+        raise AptNonNetworkError(f"'{description}' fallo (rc={rc}). Ultimas lineas:\n{tail[-1500:]}")
+    print(f"[!] '{description}' fallo por red sin update previo. Reintentando con update...")
+    return _apt_with_mirror_fallback(install_cmd, description)
+
+
+def apt_local(args, description=None):
+    """apt-get que NO descarga nada (purge, autoremove, clean): sin
+    preguntas, con salida en vivo y esperando el lock si esta ocupado."""
+    description = description or f"apt-get {args}"
+    _activate_sudo()
+    print(f"[*] {description}...")
+    rc, tail = _run_apt_cmd(f"{APT_GET} {args}")
+    if rc != 0:
+        raise RuntimeError(f"'{description}' fallo (rc={rc}). Ultimas lineas:\n{tail[-1500:]}")
 
 
 def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_timeout=15):
     """Pre-flight ANTES de correr el playbook de Ansible.
 
-    El playbook incluye una tarea de 'apt-get dist-upgrade' contra el
-    mirror de Ubuntu configurado. Ese mirror a veces devuelve 403 Forbidden
-    o corta la conexion (connection reset) de forma transitoria, lo cual
-    tumba la tarea de Ansible (que solo tiene 1 intento) y con ella todo
-    el Paso 8.
-
-    Corre el dist-upgrade DE VERDAD, aqui, en Python, antes de invocar
-    Ansible: primero con los sources default y, solo si falla, probando
-    mirrors alternos (ver _apt_with_mirror_fallback). Si tiene exito, el
-    sistema queda ya actualizado y cuando Ansible llegue a su propia tarea
-    de 'apt-get dist-upgrade' no habra nada pendiente que descargar (o sera
-    minimo), usando los mismos sources ya validados.
+    El playbook incluye un 'apt-get dist-upgrade' con un solo intento; si el
+    repo de Ubuntu falla en ese momento (403, connection reset), se cae todo
+    el Paso 8. Por eso el dist-upgrade se corre aqui primero: con los
+    sources default y, solo si fallan, con mirrors alternos (ver
+    _apt_with_mirror_fallback). Cuando Ansible llega a su dist-upgrade ya no
+    queda nada (o casi nada) por descargar.
     """
     _apt_with_mirror_fallback(
-        "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y",
-        "apt-get dist-upgrade -y",
+        f"{APT_GET} dist-upgrade",
+        "apt-get dist-upgrade",
         max_retries_per_mirror=max_retries_per_mirror,
         base_delay=base_delay,
         connect_timeout=connect_timeout,
@@ -992,27 +1192,87 @@ def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_tim
     return True
 
 
+DHCP_SOURCE_HOST = "172.24.125.136"
+DHCP_SERVICES = ("isc-dhcp-server", "isc-dhcp-server6")
+
+
+def _ensure_isc_dhcp_server_installed():
+    """isc-dhcp-server normalmente lo instala el playbook de Ansible. Si el
+    paso de DHCP corre antes (equipo nuevo), se instala aqui para que
+    'systemctl restart' no falle con 'Unit isc-dhcp-server.service not
+    found'. Ansible despues solo confirma que ya esta instalado."""
+    version = _installed_pkg_version("isc-dhcp-server")
+    if version:
+        print(f"[=] isc-dhcp-server ya esta instalado ({version}).")
+        return
+    print("[*] isc-dhcp-server todavia no esta instalado. Instalandolo...")
+    apt_install(["isc-dhcp-server"])
+
+
+def _restart_dhcp_services(fatal=True):
+    """Reinicia isc-dhcp-server e isc-dhcp-server6. Si alguno falla, muestra
+    las ultimas lineas de su log para ver la causa. Con fatal=False solo
+    avisa y devuelve False en vez de detener el programa."""
+    all_ok = True
+    for svc in DHCP_SERVICES:
+        _activate_sudo()
+        print(f"[CMD] sudo systemctl restart {svc}")
+        res = subprocess.run(["sudo", "systemctl", "restart", svc],
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        if res.returncode == 0:
+            print(f"[✓] {svc} reiniciado.")
+            continue
+        all_ok = False
+        journal = subprocess.run(["sudo", "journalctl", "-u", svc, "-n", "25", "--no-pager"],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True).stdout
+        print(f"[!] No se pudo reiniciar {svc} (rc={res.returncode}): {res.stderr.strip()}")
+        print(f"[!] Ultimas lineas del log de {svc}:\n{journal.rstrip()}")
+        if fatal:
+            print_ascii_fail(f"No se pudo reiniciar {svc}.")
+            raise RuntimeError(
+                f"'systemctl restart {svc}' fallo (rc={res.returncode}). Revisa /etc/dhcp/ "
+                f"y el log del servicio de arriba."
+            )
+    return all_ok
+
+
+def _setup_dhcp_from_source_rack(fatal_restart=True):
+    """Instala isc-dhcp-server si falta, baja dhcpd.conf y dhcpd6.conf del
+    rack fuente (DHCP_SOURCE_HOST), los pone en /etc/dhcp/ y reinicia los
+    servicios. Devuelve True si los servicios quedaron reiniciados."""
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    home_dir = f"/home/{sudo_user}"
+
+    _ensure_isc_dhcp_server_installed()
+
+    _scp_download("testusr", DHCP_SOURCE_HOST, "/etc/dhcp/dhcpd.conf", home_dir)
+    _scp_download("testusr", DHCP_SOURCE_HOST, "/etc/dhcp/dhcpd6.conf", home_dir)
+    for name in ("dhcpd.conf", "dhcpd6.conf"):
+        run_command(f"sudo mv {home_dir}/{name} /etc/dhcp/{name}")
+
+    return _restart_dhcp_services(fatal=fatal_restart)
+
+
 def ensure_dhcp():
-    """Verifica que dhcpd.conf y dhcpd6.conf existan en /etc/dhcp/ y reinicia
-    los servicios DHCP (IPv4 e IPv6). Corre antes de run_ansible_playbook()."""
+    """DHCP ANTES de Ansible (equipo nuevo incluido): instala isc-dhcp-server
+    si falta, baja dhcpd.conf/dhcpd6.conf del rack fuente y reinicia los
+    servicios.
+
+    Si aqui los servicios no arrancan (por ejemplo porque la red de prueba
+    todavia no esta configurada), solo se avisa y se sigue: el paso
+    provisional_dhcp(), despues de Ansible, los vuelve a configurar y
+    reiniciar, y ahi un fallo si detiene el programa."""
     if is_step_completed("ensure_dhcp"):
         print("[=] Paso 'ensure_dhcp' ya fue ejecutado previamente. Omitiendo...")
         return
-    print("--- PASO: Asegurar configuracion de DHCP ---")
+    print("--- PASO: Asegurar configuracion de DHCP (antes de Ansible) ---")
 
-    for conf_path in ("/etc/dhcp/dhcpd.conf", "/etc/dhcp/dhcpd6.conf"):
-        if not os.path.isfile(conf_path):
-            print_ascii_fail(f"No existe '{conf_path}'.")
-            raise RuntimeError(f"No se encontro '{conf_path}'. Verifica la configuracion de DHCP.")
-        print(f"[✓] {conf_path} presente.")
-
-    _run_shell_sequence([
-        "sudo systemctl restart isc-dhcp-server",
-        "sudo systemctl restart isc-dhcp-server6",
-    ])
-
-    print("[✓] Archivos DHCP verificados y servicios reiniciados.")
-    mark_step_completed("ensure_dhcp")
+    if _setup_dhcp_from_source_rack(fatal_restart=False):
+        print("[✓] DHCP configurado y servicios reiniciados.")
+        mark_step_completed("ensure_dhcp")
+    else:
+        print("[!] Los servicios DHCP no arrancaron todavia. Se continua; se vuelven a "
+              "configurar y reiniciar en el Paso 9, despues de Ansible.")
 
 def run_ansible_playbook():
     if is_step_completed("run_ansible_playbook"):
@@ -1026,7 +1286,8 @@ def run_ansible_playbook():
     if not hostname:
         raise RuntimeError("No se encontro el hostname en la configuracion. Asegurate de correr 'set_ID' primero.")
 
-    print("[*] Pre-flight: verificando mirror de apt antes de invocar Ansible...")
+    print("[*] Pre-flight antes de Ansible: apt-get dist-upgrade (con los sources default; "
+          "mirrors alternos solo si fallan). Puede tardar varios minutos...")
     ensure_apt_mirror_ready()
 
     pip_upgrade_cmd = 'sudo python3.10 -m pip install --upgrade pip'
@@ -1048,7 +1309,7 @@ def run_ansible_playbook():
     )
 
     print(f"[CMD Interactive] {cmd}")
-    child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=None)
+    child = _spawn_bash(cmd, encoding="utf-8", timeout=None)
     
     output_buffer = ""
 
@@ -1128,27 +1389,16 @@ def run_ansible_playbook():
     time.sleep(15)
 
 def provisional_dhcp():
-    """Descarga dhcpd.conf y dhcpd6.conf desde 172.24.125.136:/etc/dhcp/ al
-    home del usuario, los mueve a /etc/dhcp/ y reinicia los servicios DHCP
-    (IPv4 e IPv6)."""
+    """Paso 9 (despues de Ansible): instala isc-dhcp-server si falta, baja
+    dhcpd.conf y dhcpd6.conf desde el rack fuente, los pone en /etc/dhcp/ y
+    reinicia los servicios DHCP (IPv4 e IPv6). Aqui un fallo detiene el
+    programa."""
     if is_step_completed("provisional_dhcp"):
         print("[=] Paso 'provisional_dhcp' ya fue ejecutado previamente. Omitiendo...")
         return
 
     print("--- PASO 9: Configuracion de Archivos DHCP ---")
-
-    sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    home_dir = f"/home/{sudo_user}"
-
-    _scp_download("testusr", "172.24.125.136", "/etc/dhcp/dhcpd.conf", home_dir)
-    _scp_download("testusr", "172.24.125.136", "/etc/dhcp/dhcpd6.conf", home_dir)
-
-    _run_shell_sequence([
-        f"sudo mv {home_dir}/dhcpd.conf /etc/dhcp/",
-        f"sudo mv {home_dir}/dhcpd6.conf /etc/dhcp/",
-        "sudo systemctl restart isc-dhcp-server",
-        "sudo systemctl restart isc-dhcp-server6",
-    ])
+    _setup_dhcp_from_source_rack(fatal_restart=True)
 
     print("[✓] Archivos DHCP instalados en /etc/dhcp/ y servicios reiniciados.")
     print("[*] Esperando 15 segundos...")
@@ -1201,7 +1451,7 @@ def run_final_abmx_config():
     cmd_remote_copy = f"ssh {sudo_user}@{mirror_ip} '{ssh_copy_cmd}'"
     print(f"[CMD Interactive] {cmd_remote_copy}")
 
-    child_copy = pexpect.spawn("bash", ["-c", cmd_remote_copy], encoding="utf-8", timeout=300)
+    child_copy = _spawn_bash(cmd_remote_copy, encoding="utf-8", timeout=300)
     child_copy.logfile_read = sys.stdout
 
     while True:
@@ -1232,7 +1482,7 @@ def run_final_abmx_config():
     cmd_remote_ansible = f"ssh -t {sudo_user}@{mirror_ip} '{ansible_cmd}'"
     print(f"[CMD Interactive] {cmd_remote_ansible}")
 
-    child_ansible = pexpect.spawn("bash", ["-c", cmd_remote_ansible], encoding="utf-8", timeout=None)
+    child_ansible = _spawn_bash(cmd_remote_ansible, encoding="utf-8", timeout=None)
     child_ansible.logfile_read = sys.stdout
 
     play_recap_detected = False
@@ -1495,7 +1745,7 @@ def _try_minicom_connect(device, baud):
     Devuelve el objeto pexpect.spawn conectado si tuvo exito, o None si fallo."""
     cmd = f"sudo minicom -D {device} -b {baud}"
     print(f"[CMD Interactive] {cmd}")
-    c = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=30)
+    c = _spawn_bash(cmd, encoding="utf-8", timeout=30)
     c.logfile_read = sys.stdout
 
     idx = c.expect([
@@ -1995,7 +2245,7 @@ def zpe_config():
         "ssh -t -t -v -o ConnectTimeout=10 admin@10.0.0.253 < lego_config_zpe_allports.sh"
     )
     print(f"[CMD Interactive] {ssh_cmd}")
-    ssh_child = pexpect.spawn("bash", ["-c", ssh_cmd], encoding="utf-8", timeout=600)
+    ssh_child = _spawn_bash(ssh_cmd, encoding="utf-8", timeout=600)
     ssh_child.logfile_read = sys.stdout
 
     idx = ssh_child.expect([
@@ -2032,7 +2282,7 @@ def _scp_download_once(remote_user, remote_host, remote_path, destination="."):
     cmd = f"scp -r {remote_user}@{remote_host}:{remote_path} {destination}"
     print(f"[CMD Interactive] {cmd}")
 
-    child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=None)
+    child = _spawn_bash(cmd, encoding="utf-8", timeout=None)
     child.logfile_read = sys.stdout
 
     while True:
@@ -2085,7 +2335,13 @@ def _run_shell_sequence(commands, timeout=600):
     for c in commands:
         print(f"    $ {c}")
 
-    child = pexpect.spawn("bash", encoding="utf-8", timeout=timeout)
+    if SUDO_PASSWORD and not _is_root():
+        # Activa sudo en la terminal nueva y luego abre el bash interactivo
+        # (mismo proceso/sesion, asi que sudo ya no pide contrasena).
+        child = pexpect.spawn("bash", ["-c", _SUDO_PRIME + "exec bash"], env=_sudo_env(),
+                              encoding="utf-8", timeout=timeout)
+    else:
+        child = pexpect.spawn("bash", encoding="utf-8", timeout=timeout)
     child.logfile_read = sys.stdout
 
     try:
@@ -2321,7 +2577,7 @@ def _open_zpe_console_telnet(port, timeout=45, take_control=False):
     detecta el aviso de solo lectura) vive en _tross_ensure_logged_in."""
     cmd = f"telnet 10.0.0.253 {port}"
     print(f"[CMD Interactive] {cmd}")
-    child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=timeout)
+    child = _spawn_bash(cmd, encoding="utf-8", timeout=timeout)
     child.logfile_read = sys.stdout
     idx = child.expect([r"Escape character is", pexpect.TIMEOUT, pexpect.EOF], timeout=20)
     if idx != 0:
@@ -2524,7 +2780,7 @@ def _run_local_cmd_with_wait(cmd, max_wait_seconds, poll_interval=10, label="Esp
     RESET = "\033[0m"
     marker = f"__CMDDONE_{uuid.uuid4().hex}__"
     print(f"[CMD Local] {cmd}")
-    child = pexpect.spawn("bash", ["-c", f"{cmd}; echo {marker}$?"], encoding="utf-8",
+    child = _spawn_bash(f"{cmd}; echo {marker}$?", encoding="utf-8",
                            timeout=max_wait_seconds + 60)
     child.logfile_read = sys.stdout
     elapsed = 0
@@ -2679,7 +2935,7 @@ def _tross_reconfigure_zpe_eth1():
     print("[*] Conectando por SSH a admin@10.0.0.253 para reconfigurar ETH1...")
     ssh_cmd = "ssh admin@10.0.0.253"
     print(f"[CMD Interactive] {ssh_cmd}")
-    child = pexpect.spawn("bash", ["-c", ssh_cmd], encoding="utf-8", timeout=60)
+    child = _spawn_bash(ssh_cmd, encoding="utf-8", timeout=60)
     child.logfile_read = sys.stdout
 
     idx = child.expect([
@@ -3675,7 +3931,7 @@ def download_python_tools():
             print(f"[*] Descargando {filename} por SCP...")
             print(f"[CMD Interactive] {cmd}")
 
-            child = pexpect.spawn("bash", ["-c", cmd], encoding="utf-8", timeout=None)
+            child = _spawn_bash(cmd, encoding="utf-8", timeout=None)
 
             class PexpectLogger:
                 def write(self, text):
@@ -3724,9 +3980,12 @@ def fix_chrome():
     print("--- PASO: Eliminación y Reinstalación Limpia de Google Chrome ---")
 
     print("[*] Eliminando y purgando Google Chrome...")
-    run_interactive("sudo apt-get purge google-chrome-stable -y")
-    run_interactive("sudo apt-get autoremove -y")
-    run_interactive("sudo apt-get clean -y")
+    if _installed_pkg_version("google-chrome-stable"):
+        apt_local("purge google-chrome-stable")
+    else:
+        print("[=] google-chrome-stable no esta instalado; no hay nada que purgar.")
+    apt_local("autoremove")
+    apt_local("clean")
 
     print("[*] Limpiando archivos de configuración residuales y llaves GPG antiguas...")
     run_command("sudo rm -f /etc/apt/trusted.gpg.d/google-chrome.gpg", check=False)
@@ -3928,7 +4187,7 @@ def _force_reboot():
     reboot_cmd = "sudo reboot"
     print(f"[CMD Interactive] {reboot_cmd}")
     try:
-        child = pexpect.spawn("bash", ["-c", reboot_cmd], encoding="utf-8", timeout=30)
+        child = _spawn_bash(reboot_cmd, encoding="utf-8", timeout=30)
         child.logfile_read = sys.stdout
         idx = child.expect([
             r"\[sudo\] password for .*:?",
@@ -4048,6 +4307,13 @@ def main():
         print("[!] No se pudo confirmar la activacion inicial de sudo.")
     # 2) Mantener sudo vivo durante toda la ejecucion.
     start_sudo_keepalive()
+    # 3) Si una corrida anterior dejo sources.list en un mirror alterno,
+    #    volver a los sources default antes de cualquier paso (incluidos los
+    #    scripts externos que corren apt por su cuenta).
+    try:
+        restore_default_apt_sources()
+    except Exception as e:
+        print(f"[!] Advertencia: no se pudo revisar/restaurar sources.list ({e}).")
 
     set_ID()
     set_network()
