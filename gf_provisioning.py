@@ -11,6 +11,7 @@ import select
 import atexit
 import uuid
 import getpass
+import threading
 
 # ==============================================================================
 # CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
@@ -113,15 +114,24 @@ def print_ascii_pass(message="Mirror de apt + Ansible Playbook: OK."):
 
 _state_perms_fixed = False
 
+def _sudo_chown_noninteractive(path):
+    """chown del archivo al usuario real SIN pedir contrasena nunca
+    ('sudo -n'). Devuelve True si quedo corregido."""
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    res = subprocess.run(["sudo", "-n", "chown", f"{sudo_user}:{sudo_user}", path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return res.returncode == 0
+
 def fix_state_file_permissions():
     """Corrige el ownership de STATE_FILE una sola vez por ejecucion."""
     global _state_perms_fixed
     if _state_perms_fixed:
         return
     if os.path.exists(STATE_FILE):
-        sudo_user = os.environ.get('SUDO_USER', 'testusr')
-        subprocess.run(f"sudo chown {sudo_user}:{sudo_user} {STATE_FILE}", shell=True, stderr=subprocess.DEVNULL)
-        _state_perms_fixed = True
+        # 'sudo -n': nunca pide contrasena. Si sudo aun no esta activo, falla
+        # en silencio y se reintenta en la siguiente llamada (ya con sudo).
+        if _sudo_chown_noninteractive(STATE_FILE):
+            _state_perms_fixed = True
 
 def _atomic_write_json(filepath, data):
     """Escribe 'data' como JSON de forma atomica: primero a un archivo
@@ -206,10 +216,8 @@ def fix_tross_state_file_permissions():
     if _tross_state_perms_fixed:
         return
     if os.path.exists(TROSS_STATE_FILE):
-        sudo_user = os.environ.get('SUDO_USER', 'testusr')
-        subprocess.run(f"sudo chown {sudo_user}:{sudo_user} {TROSS_STATE_FILE}", shell=True,
-                        stderr=subprocess.DEVNULL)
-        _tross_state_perms_fixed = True
+        if _sudo_chown_noninteractive(TROSS_STATE_FILE):
+            _tross_state_perms_fixed = True
 
 def load_tross_state():
     fix_tross_state_file_permissions()
@@ -246,37 +254,93 @@ def _prompt_password_twice(label):
             continue
         return p1
 
+def _is_root():
+    return os.geteuid() == 0
+
+
+def _sudo_password_is_valid(password):
+    """Valida la contrasena contra sudo IGNORANDO la cache ('-k'), sin
+    shell y sin que la contrasena aparezca en la linea de comandos."""
+    if _is_root():
+        return True
+    try:
+        res = subprocess.run(["sudo", "-S", "-k", "-p", "", "-v"],
+                             input=password + "\n", capture_output=True,
+                             text=True, timeout=15)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def _sudo_with_password(args, timeout=30):
+    """Corre 'sudo <args>' pasando SUDO_PASSWORD por stdin (sin shell, sin
+    'echo' en la linea de comandos: soporta cualquier caracter especial)."""
+    return subprocess.run(["sudo", "-S", "-p", ""] + list(args),
+                          input=(SUDO_PASSWORD or "") + "\n",
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def _read_stored_credentials():
+    """Lee las credenciales guardadas. Si el state file no es legible
+    (por ejemplo, quedo con dueno root de una corrida anterior), devuelve
+    (None, None, False) para que se pida sudo y se corrija el dueno."""
+    try:
+        state = load_state()
+    except PermissionError:
+        return None, None, False
+    creds = state.get("config", {}).get("_credentials", {})
+    return creds.get("sudo_password"), creds.get("mirror_password"), True
+
+
 def ensure_credentials():
-    """Se llama SIEMPRE como lo primero al arrancar el script (antes de
-    _activate_sudo() y de cualquier otro paso). La primera vez que se
-    corre el script en un equipo, pide interactivamente la contrasena de
-    sudo y la del usuario 'testusr' en el Git-Mirror, cada una dos veces
-    para validar que coincidan, y las guarda en STATE_FILE. En corridas
-    posteriores (o tras un reinicio a mitad del provisioning) las lee
-    directo del state file sin volver a preguntar.
+    """Lo PRIMERO que corre el programa. Garantiza que:
+
+      * La contrasena de sudo y la del Git-Mirror se piden UNA sola vez
+        (la primera corrida en el equipo) y se guardan en STATE_FILE
+        (chmod 600). En corridas siguientes (o tras reinicios) se cargan
+        sin preguntar nada.
+      * La contrasena de sudo se VALIDA antes de guardarla: si se escribe
+        mal, se vuelve a pedir ahi mismo en vez de fallar mas adelante.
+        Si la contrasena guardada dejo de funcionar (se cambio), se pide
+        de nuevo una sola vez y se actualiza.
+      * sudo queda activado al terminar, sin mas interaccion.
 
     VAULT_PASSWORD se queda hardcodeada en el codigo por decision
     explicita -- esta funcion no la toca.
     """
     global SUDO_PASSWORD, MIRROR_PASSWORD
 
-    state = load_state()
-    creds = state.get("config", {}).get("_credentials", {})
-    stored_sudo = creds.get("sudo_password")
-    stored_mirror = creds.get("mirror_password")
+    stored_sudo, stored_mirror, readable = _read_stored_credentials()
+
+    if stored_sudo and not _sudo_password_is_valid(stored_sudo):
+        print("[!] La contrasena de sudo guardada ya no es valida. Se pedira de nuevo.")
+        stored_sudo = None
 
     if stored_sudo and stored_mirror:
-        SUDO_PASSWORD = stored_sudo
-        MIRROR_PASSWORD = stored_mirror
-        print("[=] Credenciales ya configuradas previamente. Cargando desde el state file...")
+        SUDO_PASSWORD, MIRROR_PASSWORD = stored_sudo, stored_mirror
+        print("[=] Credenciales cargadas desde el state file (no se pide nada).")
+        _activate_sudo()
         return
 
-    print("--- Configuracion inicial de credenciales ---")
-    print("Esto solo se pide una vez por equipo; quedan guardadas en el state file")
-    print("para esta y futuras ejecuciones (incluidos los reinicios a mitad del proceso).\n")
+    print("--- Configuracion de credenciales (solo se pide una vez) ---\n")
 
-    SUDO_PASSWORD = stored_sudo or _prompt_password_twice("sudo (usuario local del equipo)")
-    MIRROR_PASSWORD = stored_mirror or _prompt_password_twice("del usuario 'testusr' en el Git-Mirror (172.24.125.2)")
+    while not stored_sudo:
+        candidate = _prompt_password_twice("sudo (usuario local del equipo)")
+        if _sudo_password_is_valid(candidate):
+            stored_sudo = candidate
+        else:
+            print("[!] sudo rechazo esa contrasena. Intenta de nuevo.\n")
+    SUDO_PASSWORD = stored_sudo
+    _activate_sudo()
+
+    if not readable:
+        # Ya con sudo activo corregimos el dueno y volvemos a leer.
+        fix_state_file_permissions()
+        _, stored_mirror_retry, _ = _read_stored_credentials()
+        stored_mirror = stored_mirror or stored_mirror_retry
+
+    MIRROR_PASSWORD = stored_mirror or _prompt_password_twice(
+        "del usuario 'testusr' en el Git-Mirror (172.24.125.2)")
 
     state = load_state()
     state.setdefault("config", {})["_credentials"] = {
@@ -285,25 +349,29 @@ def ensure_credentials():
     }
     save_state(state)
 
-    # El state file ahora contiene contrasenas en texto plano: restringimos
-    # su lectura al dueno del archivo como mitigacion minima.
-    subprocess.run(f"sudo chmod 600 {STATE_FILE}", shell=True, check=False)
+    # El state file contiene contrasenas en texto plano: restringimos su
+    # lectura al dueno del archivo como mitigacion minima.
+    try:
+        os.chmod(STATE_FILE, 0o600)
+    except PermissionError:
+        subprocess.run(["sudo", "-n", "chmod", "600", STATE_FILE], check=False)
 
-    print(f"[✓] Credenciales guardadas en {STATE_FILE} (permisos restringidos a 600).\n")
+    print(f"[✓] Credenciales guardadas en {STATE_FILE} (permisos 600).\n")
+
 
 def _activate_sudo():
     """Activa (o refresca) las credenciales de sudo en cache de forma NO
-    interactiva, usando SUDO_PASSWORD via 'sudo -S -v'. Se llama solo en
-    puntos puntuales del flujo (inicio del programa, tras el ansible local,
-    y tras salir del mirror), no de forma continua."""
+    interactiva. Primero prueba 'sudo -n -v' (si la cache sigue viva no
+    hace falta la contrasena); si no, usa SUDO_PASSWORD por stdin."""
+    if _is_root():
+        return True
     try:
-        res = subprocess.run(
-            f'echo "{SUDO_PASSWORD}" | sudo -S -v',
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=15
-        )
+        if subprocess.run(["sudo", "-n", "-v"], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, timeout=15).returncode == 0:
+            return True
+        if not SUDO_PASSWORD:
+            return False
+        res = _sudo_with_password(["-v"], timeout=15)
         if res.returncode != 0:
             print(f"[!] Advertencia: no se pudo activar/refrescar sudo automaticamente "
                   f"({res.stderr.strip()}).")
@@ -311,6 +379,25 @@ def _activate_sudo():
     except Exception as e:
         print(f"[!] Advertencia: excepcion al activar/refrescar sudo automaticamente ({e}).")
         return False
+
+
+_sudo_keepalive_stop = threading.Event()
+
+def start_sudo_keepalive(interval=60):
+    """Hilo en segundo plano que refresca sudo cada 'interval' segundos
+    durante toda la ejecucion. Asi la cache de sudo (15 min por default)
+    nunca expira a mitad de un paso largo y ningun comando con sudo vuelve
+    a pedir la contrasena en la terminal."""
+    if _is_root():
+        return
+
+    def _loop():
+        while not _sudo_keepalive_stop.wait(interval):
+            _activate_sudo()
+
+    t = threading.Thread(target=_loop, name="sudo-keepalive", daemon=True)
+    t.start()
+    atexit.register(_sudo_keepalive_stop.set)
 
 def run_command(cmd, check=True):
     print(f"[CMD] {cmd}")
@@ -336,7 +423,7 @@ def run_interactive(cmd, timeout=3600):
             r"[pP]assword:",
             pexpect.EOF,
             pexpect.TIMEOUT
-        ], timeout=600)
+        ], timeout=timeout)
 
         if idx == 0 or idx == 1:
             child.sendline(SUDO_PASSWORD)
@@ -637,7 +724,10 @@ def validate_and_lego_setup():
     run_interactive(val_cmd, timeout=600)
 
     print("[*] Agregando repositorio universe e instala librerias pip de Google...")
-    run_interactive("sudo add-apt-repository universe -y")
+    # -n: no corre su propio apt update; lo hacemos con apt_update() para
+    # usar la logica default -> mirrors alternos.
+    run_interactive("sudo add-apt-repository -n universe -y")
+    apt_update()
     run_interactive("sudo pip3 install google-cloud-appengine-logging google-cloud-audit-log google-cloud-logging")
 
     lego_dir = os.path.join(user_home, "lego-infra")
@@ -701,10 +791,9 @@ def setup_nomachine_yaml():
     print(f"[✓] Archivo {yaml_path} actualizado exitosamente.")
     mark_step_completed("setup_nomachine_yaml", {"nomachine_url": nomachine_url})
 
-# Mirrors candidatos a probar, en orden. El primero es el que ya usaba el
-# sistema; el resto son mirrors publicos alternativos y confiables para
-# Ubuntu 22.04 (jammy). Si tu org tiene un mirror interno/propio, ponlo
-# primero en esta lista.
+# Mirrors ALTERNOS. Solo se usan si el comando de apt falla con los sources
+# que el sistema ya tiene configurados (los "default"). Se prueban en orden.
+# Si tu org tiene un mirror interno/propio, ponlo primero en esta lista.
 APT_CANDIDATE_MIRRORS = [
     "http://us.archive.ubuntu.com/ubuntu/",
     "http://archive.ubuntu.com/ubuntu/",
@@ -751,22 +840,68 @@ def _point_sources_list_to_mirror(mirror_url):
     subprocess.run(sed_cmd, shell=True, check=False)
 
 
+def _run_apt_attempts(apt_command, description, label, max_retries, base_delay):
+    """Corre 'apt-get update' + 'apt_command' con los sources tal como esten
+    en ese momento, hasta 'max_retries' veces con backoff exponencial.
+    'label' solo se usa en los logs (p.ej. 'sources default' o la URL del
+    mirror). Devuelve True si ambos comandos terminaron con rc=0."""
+    for attempt in range(1, max_retries + 1):
+        print(f"[*] apt-get update ({label}, intento {attempt}/{max_retries})...")
+        update_res = subprocess.run("sudo apt-get update", shell=True, capture_output=True, text=True)
+
+        if update_res.returncode != 0:
+            print(f"[!] 'apt-get update' fallo (rc={update_res.returncode}). "
+                  f"stderr: {update_res.stderr.strip()[:300]}")
+        elif apt_command == "true":
+            print(f"[✓] '{description}' completado correctamente ({label}).")
+            return True
+        else:
+            print(f"[*] {description} ({label}, intento {attempt}/{max_retries})...")
+            cmd_res = subprocess.run(apt_command, shell=True, capture_output=True, text=True)
+            if cmd_res.returncode == 0:
+                print(f"[✓] '{description}' completado correctamente ({label}).")
+                return True
+            print(f"[!] '{description}' fallo (rc={cmd_res.returncode}). "
+                  f"stderr: {cmd_res.stderr.strip()[:500]}")
+
+        if attempt < max_retries:
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f"[*] Reintentando en {delay}s ({label})...")
+            time.sleep(delay)
+    return False
+
+
 def _apt_with_mirror_fallback(apt_command, description, max_retries_per_mirror=2,
-                               base_delay=10, connect_timeout=15):
-    """Nucleo generico de 'ejecutar un comando de apt probando varios mirrors
-    con reintentos'. Usado tanto por apt_update()/apt_install() (para
-    cualquier paso del script que necesite instalar paquetes) como por
-    ensure_apt_mirror_ready() (el pre-flight especifico del dist-upgrade
-    antes de Ansible).
+                               base_delay=10, connect_timeout=15, max_retries_default=2):
+    """Nucleo generico de 'ejecutar un comando de apt, y solo si falla,
+    probar mirrors alternos'. Usado por apt_update()/apt_install() (para
+    cualquier paso del script que necesite instalar paquetes) y por
+    ensure_apt_mirror_ready() (el pre-flight del dist-upgrade antes de
+    Ansible).
 
-    Siempre corre 'apt-get update' primero contra el mirror que se este
-    probando, y luego 'apt_command'. Si cualquiera de los dos falla, se
-    reintenta (backoff exponencial) y, si se agotan los reintentos, se
-    prueba el siguiente mirror de APT_CANDIDATE_MIRRORS.
+    Fase 1 (default): corre 'apt-get update' + 'apt_command' tal cual,
+    SIN tocar /etc/apt/sources.list, con 'max_retries_default' reintentos.
+    Si funciona, termina aqui y nunca se toca ningun mirror.
 
-    Devuelve el mirror_url que funciono. Lanza RuntimeError si todos los
-    mirrors fallan (y en ese caso restaura el sources.list original).
+    Fase 2 (fallback): solo si la fase 1 fallo. Respalda sources.list y
+    prueba uno por uno los mirrors de APT_CANDIDATE_MIRRORS (apuntando
+    sources.list a cada uno), con 'max_retries_per_mirror' reintentos
+    cada uno. El primer mirror que funcione se queda configurado para que
+    los pasos siguientes (y Ansible) lo usen.
+
+    Devuelve "default" si funciono con los sources originales, o el
+    mirror_url que funciono. Lanza RuntimeError si todo falla (y en ese
+    caso restaura el sources.list original).
     """
+    # --- Fase 1: sources default, sin tocar sources.list ---
+    print(f"[*] '{description}': intentando primero con los sources default del sistema...")
+    if _run_apt_attempts(apt_command, description, "sources default",
+                         max_retries_default, base_delay):
+        return "default"
+
+    # --- Fase 2: fallback a mirrors alternos ---
+    print(f"[!] '{description}' fallo con los sources default. "
+          f"Cambiando a mirrors alternos...")
     _backup_sources_list_once()
 
     for mirror_url in APT_CANDIDATE_MIRRORS:
@@ -780,55 +915,38 @@ def _apt_with_mirror_fallback(apt_command, description, max_retries_per_mirror=2
         print(f"[✓] Mirror respondio HTTP {http_code}. Apuntando sources.list a este mirror...")
         _point_sources_list_to_mirror(mirror_url)
 
-        for attempt in range(1, max_retries_per_mirror + 1):
-            print(f"[*] apt-get update (mirror={mirror_url}, intento {attempt}/{max_retries_per_mirror})...")
-            update_res = subprocess.run("sudo apt-get update", shell=True, capture_output=True, text=True)
-
-            if update_res.returncode != 0:
-                print(f"[!] 'apt-get update' fallo (rc={update_res.returncode}). "
-                      f"stderr: {update_res.stderr.strip()[:300]}")
-            else:
-                print(f"[*] {description} (mirror={mirror_url}, intento {attempt}/{max_retries_per_mirror})...")
-                cmd_res = subprocess.run(apt_command, shell=True, capture_output=True, text=True)
-                if cmd_res.returncode == 0:
-                    print(f"[✓] '{description}' completado correctamente con {mirror_url}.")
-                    return mirror_url
-                else:
-                    print(f"[!] '{description}' fallo (rc={cmd_res.returncode}). "
-                          f"stderr: {cmd_res.stderr.strip()[:500]}")
-
-            if attempt < max_retries_per_mirror:
-                delay = base_delay * (2 ** (attempt - 1))
-                print(f"[*] Reintentando en {delay}s con el mismo mirror...")
-                time.sleep(delay)
+        if _run_apt_attempts(apt_command, description, f"mirror={mirror_url}",
+                             max_retries_per_mirror, base_delay):
+            return mirror_url
 
         print(f"[!] {mirror_url} agoto sus reintentos para '{description}'. Probando el siguiente mirror...")
 
     _restore_sources_list()
     raise RuntimeError(
-        f"No se pudo completar '{description}' con ninguno de los mirrors probados "
-        f"({', '.join(APT_CANDIDATE_MIRRORS)}). Se restauro el sources.list original. "
-        f"Verifica la conectividad de red del host o agrega un mirror interno "
-        f"confiable al inicio de APT_CANDIDATE_MIRRORS."
+        f"No se pudo completar '{description}' ni con los sources default ni con "
+        f"ninguno de los mirrors alternos ({', '.join(APT_CANDIDATE_MIRRORS)}). "
+        f"Se restauro el sources.list original. Verifica la conectividad de red "
+        f"del host o agrega un mirror interno confiable al inicio de "
+        f"APT_CANDIDATE_MIRRORS."
     )
 
 
 def apt_update():
-    """'apt-get update' con fallback automatico entre mirrors. Usar SIEMPRE
-    en vez de 'run_interactive(\"sudo apt update\")' / 'sudo apt-get update'
-    sueltos, para que un mirror caido no tumbe el paso completo."""
+    """'apt-get update': primero con los sources default y, solo si falla,
+    con mirrors alternos. Usar SIEMPRE en vez de
+    'run_interactive(\"sudo apt update\")' / 'sudo apt-get update' sueltos."""
     return _apt_with_mirror_fallback("true", "apt-get update")
 
 
 def apt_install(pkgs, update=True):
-    """Instala uno o mas paquetes con fallback automatico entre mirrors y
-    reintentos. 'pkgs' puede ser un string ('git curl') o una lista
-    (['git', 'curl']). Usar SIEMPRE en vez de 'run_interactive(\"sudo apt
-    install -y ...\")' suelto en cualquier paso del script.
+    """Instala uno o mas paquetes: primero con los sources default y, solo
+    si falla, con mirrors alternos. 'pkgs' puede ser un string
+    ('git curl') o una lista (['git', 'curl']). Usar SIEMPRE en vez de
+    'run_interactive(\"sudo apt install -y ...\")' suelto.
 
-    Con update=True (default) corre 'apt-get update' contra el mismo
-    mirror antes de instalar, en la misma pasada (necesario, por ejemplo,
-    justo despues de agregar un repo nuevo como el de Chrome).
+    Con update=True (default) corre 'apt-get update' antes de instalar, en
+    la misma pasada (necesario, por ejemplo, justo despues de agregar un
+    repo nuevo como el de Chrome).
     """
     pkgs_str = pkgs if isinstance(pkgs, str) else " ".join(pkgs)
     install_cmd = f"sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {pkgs_str}"
@@ -836,18 +954,16 @@ def apt_install(pkgs, update=True):
     if update:
         return _apt_with_mirror_fallback(install_cmd, f"apt-get install -y {pkgs_str}")
 
-    # Sin update explicito: solo probamos el mirror ya configurado (el que
-    # haya quedado de una llamada previa a apt_update()/apt_install()) y
-    # corremos el install directo, con reintentos simples.
-    for attempt in range(1, 3):
-        res = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
-        if res.returncode == 0:
-            print(f"[✓] apt-get install -y {pkgs_str} completado.")
-            return True
-        print(f"[!] Intento {attempt}/2 de 'apt-get install -y {pkgs_str}' fallo: "
-              f"{res.stderr.strip()[:300]}")
-        time.sleep(10)
-    raise RuntimeError(f"No se pudo instalar {pkgs_str} tras 2 intentos (update=False).")
+    # Sin update explicito: intentamos el install directo con lo que ya
+    # este configurado. Si falla, recurrimos al flujo completo
+    # (update + install, default y luego mirrors alternos).
+    print(f"[*] apt-get install -y {pkgs_str} (sin update previo)...")
+    res = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
+    if res.returncode == 0:
+        print(f"[✓] apt-get install -y {pkgs_str} completado.")
+        return "default"
+    print(f"[!] 'apt-get install -y {pkgs_str}' fallo sin update: {res.stderr.strip()[:300]}")
+    return _apt_with_mirror_fallback(install_cmd, f"apt-get install -y {pkgs_str}")
 
 
 def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_timeout=15):
@@ -860,11 +976,11 @@ def ensure_apt_mirror_ready(max_retries_per_mirror=2, base_delay=10, connect_tim
     el Paso 8.
 
     Corre el dist-upgrade DE VERDAD, aqui, en Python, antes de invocar
-    Ansible, probando mirrors alternos si el actual falla (ver
-    _apt_with_mirror_fallback). Si tiene exito, el sistema queda ya
-    actualizado y cuando Ansible llegue a su propia tarea de
-    'apt-get dist-upgrade' no habra nada pendiente que descargar (o sera
-    minimo), usando el mismo mirror ya validado.
+    Ansible: primero con los sources default y, solo si falla, probando
+    mirrors alternos (ver _apt_with_mirror_fallback). Si tiene exito, el
+    sistema queda ya actualizado y cuando Ansible llegue a su propia tarea
+    de 'apt-get dist-upgrade' no habra nada pendiente que descargar (o sera
+    minimo), usando los mismos sources ya validados.
     """
     _apt_with_mirror_fallback(
         "sudo DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y",
@@ -3673,7 +3789,7 @@ def _force_reboot():
     # --- Intento 2: fallback directo por subprocess con password pipeada ---
     print("[*] Reintentando el reinicio via fallback (subprocess + sudo -S)...")
     try:
-        subprocess.run(f'echo "{SUDO_PASSWORD}" | sudo -S reboot', shell=True, timeout=30)
+        _sudo_with_password(["reboot"], timeout=30)
         print("[✓] Comando de reinicio enviado correctamente (fallback subprocess).")
         return
     except Exception as e:
@@ -3682,7 +3798,7 @@ def _force_reboot():
     # --- Intento 3: ultimo recurso, reboot forzado (reboot -f) ---
     print("[*] Ultimo recurso: forzando el reinicio con 'reboot -f'...")
     try:
-        subprocess.run(f'echo "{SUDO_PASSWORD}" | sudo -S reboot -f', shell=True, timeout=30)
+        _sudo_with_password(["reboot", "-f"], timeout=30)
         print("[✓] Comando de reinicio forzado enviado correctamente ('reboot -f').")
         return
     except Exception as e:
@@ -3762,13 +3878,18 @@ def end_config_reboot():
     print("[*] Cerrando el log de ejecucion...")
     log_final_summary()
 
-if __name__ == "__main__":
+def main():
+    # 1) Credenciales (solo se piden la primera vez) y sudo activado
+    #    automaticamente, antes de cualquier otro paso.
     ensure_credentials()
     print("[*] Activando sudo de forma automatica...")
     if _activate_sudo():
         print("[✓] Sudo activado correctamente.")
     else:
         print("[!] No se pudo confirmar la activacion inicial de sudo.")
+    # 2) Mantener sudo vivo durante toda la ejecucion.
+    start_sudo_keepalive()
+
     set_ID()
     set_network()
     gitconfig_cookie()
@@ -3792,3 +3913,17 @@ if __name__ == "__main__":
     vrmu_util_config()
     tross_capture_mac()
     TROSS_CONFIG()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[!] Ejecucion interrumpida por el usuario (Ctrl+C). "
+              "El progreso ya registrado se conserva; vuelve a correr el script para continuar.")
+        sys.exit(130)
+    except Exception as e:
+        print_ascii_fail(str(e)[:200])
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
