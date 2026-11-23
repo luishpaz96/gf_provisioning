@@ -3747,6 +3747,165 @@ def fix_chrome():
     print("[✓] Google Chrome ha sido eliminado y reinstalado exitosamente.")
     mark_step_completed("fix_chrome")
 
+# Chrome Remote Desktop: la version que el playbook pide (y la ultima del
+# repo de Google) depende de librerias '*t64' que solo existen en Ubuntu
+# 24.04+, por lo que en 22.04 (jammy) falla con "unmet dependencies".
+# Si el repo no ofrece ninguna version instalable en este sistema, puedes
+# poner aqui la URL de un .deb compatible con 22.04 y se instalara desde ahi.
+CRD_PACKAGE = "chrome-remote-desktop"
+CRD_DEB_URL_OVERRIDE = None
+GOOGLE_KEYRING = "/etc/apt/keyrings/google-linux.asc"
+# Misma linea (mismas opciones) que agrega el playbook, para que apt no
+# marque "Conflicting values set for option Signed-By".
+CRD_REPO_LINE = (
+    f"deb [arch=amd64 signed-by={GOOGLE_KEYRING}] "
+    "http://dl.google.com/linux/chrome-remote-desktop/deb/ stable main"
+)
+CRD_LIST_FILE = "/etc/apt/sources.list.d/chrome-remote-desktop.list"
+
+
+def _installed_pkg_version(pkg):
+    """Version instalada de 'pkg' o None si no esta instalado."""
+    res = subprocess.run(["dpkg-query", "-W", "-f=${Status}|${Version}", pkg],
+                         capture_output=True, text=True)
+    if res.returncode != 0 or "|" not in res.stdout:
+        return None
+    status, version = res.stdout.split("|", 1)
+    return version.strip() if status.strip() == "install ok installed" else None
+
+
+def _apt_candidate_versions(pkg):
+    """Versiones disponibles de 'pkg' en los repos, de la mas nueva a la
+    mas vieja (segun 'apt-cache madison')."""
+    res = subprocess.run(["apt-cache", "madison", pkg], capture_output=True, text=True)
+    versions = []
+    for line in res.stdout.splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 2 and parts[1] and parts[1] not in versions:
+            versions.append(parts[1])
+    return versions
+
+
+def _pick_installable_version(pkg, versions):
+    """Simula ('apt-get install -s') cada version y devuelve la primera que
+    se puede instalar con las dependencias de este Ubuntu, o None."""
+    for v in versions:
+        sim = subprocess.run(["sudo", "apt-get", "install", "-s", "-y", f"{pkg}={v}"],
+                             capture_output=True, text=True)
+        if sim.returncode == 0:
+            print(f"[✓] {pkg}={v} es instalable en este sistema.")
+            return v
+        print(f"[!] {pkg}={v} no es instalable aqui (dependencias no disponibles).")
+    return None
+
+
+def _ensure_crd_repo():
+    """Llave de Google + repo de Chrome Remote Desktop (si aun no estan)."""
+    if not os.path.exists(GOOGLE_KEYRING):
+        print("[*] Descargando la llave de Google para el repo de Chrome Remote Desktop...")
+        run_interactive("sudo install -d -m 0755 /etc/apt/keyrings")
+        _retry_download(
+            lambda: run_interactive(
+                "wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | "
+                f"sudo tee {GOOGLE_KEYRING} > /dev/null"
+            ),
+            "descarga de llave GPG de Google (Chrome Remote Desktop)",
+        )
+
+    already = subprocess.run(
+        "grep -rls 'chrome-remote-desktop/deb' /etc/apt/sources.list /etc/apt/sources.list.d/",
+        shell=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if already:
+        print(f"[=] Repo de Chrome Remote Desktop ya configurado ({already.splitlines()[0]}).")
+        return
+    print("[*] Agregando el repo de Chrome Remote Desktop...")
+    run_interactive(f'echo "{CRD_REPO_LINE}" | sudo tee {CRD_LIST_FILE}')
+
+
+def _print_playbook_crd_task():
+    """Deja en el log como define el playbook la tarea de Chrome/CRD, para
+    poder diagnosticar si vuelve a fallar en Ansible."""
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    yml = (f"/home/{sudo_user}/lego-infra/lego_setup/lego_abmx_test_server/"
+           "install_packages_part2.yml")
+    if not os.path.exists(yml):
+        return
+    try:
+        with open(yml, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for i, line in enumerate(lines):
+        if "Install Google Chrome and Chrome Remote Desktop" in line:
+            print(f"[*] Definicion de la tarea en {yml} (para diagnostico):")
+            for n, l in enumerate(lines[i:i + 20], start=i + 1):
+                print(f"    {n:4d}| {l.rstrip()}")
+            return
+
+
+def fix_chrome_remote_desktop():
+    """Instala a mano Google Chrome y Chrome Remote Desktop ANTES del
+    playbook de Ansible.
+
+    El playbook intenta instalar una version de chrome-remote-desktop
+    compilada para Ubuntu 24.04 (depende de libatk1.0-0t64, libglib2.0-0t64,
+    libgtk-3-0t64, etc.) y en Ubuntu 22.04 falla con 'unmet dependencies'.
+    Aqui se elige automaticamente la version mas nueva que SI se puede
+    instalar en este sistema, se instala y se congela con 'apt-mark hold'
+    para que ni el dist-upgrade ni otras llamadas a apt la reemplacen por
+    una version incompatible.
+    """
+    if is_step_completed("fix_chrome_remote_desktop"):
+        print("[=] Paso 'fix_chrome_remote_desktop' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Instalacion manual de Google Chrome y Chrome Remote Desktop ---")
+
+    installed = _installed_pkg_version(CRD_PACKAGE)
+    if installed:
+        print(f"[=] {CRD_PACKAGE} ya esta instalado (version {installed}).")
+    else:
+        _ensure_crd_repo()
+        apt_update()
+
+        if not _installed_pkg_version("google-chrome-stable"):
+            apt_install(["google-chrome-stable"], update=False)
+
+        versions = _apt_candidate_versions(CRD_PACKAGE)
+        print(f"[*] Versiones de {CRD_PACKAGE} en el repo: {', '.join(versions) or '(ninguna)'}")
+        chosen = _pick_installable_version(CRD_PACKAGE, versions)
+
+        if chosen:
+            apt_install([f"{CRD_PACKAGE}={chosen}"], update=False)
+        elif CRD_DEB_URL_OVERRIDE:
+            deb_path = "/tmp/chrome-remote-desktop_override_amd64.deb"
+            print(f"[*] Ninguna version del repo es compatible. Usando el .deb de {CRD_DEB_URL_OVERRIDE}...")
+            _retry_download(
+                lambda: run_command(f"wget -q -O {deb_path} '{CRD_DEB_URL_OVERRIDE}'"),
+                "descarga del .deb de Chrome Remote Desktop",
+            )
+            apt_install([deb_path], update=False)
+        else:
+            print_ascii_fail("Ninguna version de chrome-remote-desktop es compatible con este Ubuntu.")
+            raise RuntimeError(
+                f"El repo de Google solo ofrece {CRD_PACKAGE} {', '.join(versions) or '(ninguna)'} "
+                f"y ninguna se puede instalar en este Ubuntu (requieren librerias *t64 de Ubuntu "
+                f"24.04). Pon en CRD_DEB_URL_OVERRIDE la URL de un .deb compatible con 22.04 y "
+                f"vuelve a correr el script."
+            )
+        installed = _installed_pkg_version(CRD_PACKAGE)
+        if not installed:
+            raise RuntimeError(f"{CRD_PACKAGE} no quedo instalado tras la instalacion manual.")
+        print(f"[✓] {CRD_PACKAGE} {installed} instalado.")
+
+    print(f"[*] Congelando {CRD_PACKAGE} {installed} (apt-mark hold)...")
+    run_interactive(f"sudo apt-mark hold {CRD_PACKAGE}")
+
+    _print_playbook_crd_task()
+    mark_step_completed("fix_chrome_remote_desktop", {"chrome_remote_desktop_version": installed})
+
+
 def _flush_log_to_disk():
     """Fuerza flush + fsync del archivo de log a disco SIN cerrarlo, para no
     romper los print() posteriores (sys.stdout/sys.stderr siguen redirigidos
@@ -3898,6 +4057,8 @@ def main():
     validate_and_lego_setup()
     #setup_nomachine_yaml()
     ensure_dhcp()
+    fix_chrome()
+    fix_chrome_remote_desktop()
     run_ansible_playbook()
     provisional_dhcp()
     network_plan()
@@ -3906,7 +4067,6 @@ def main():
     run_final_abmx_config()
     create_networkmanager_symlink()
     download_python_tools()
-    fix_chrome()
     end_config_reboot()
     juniper_config()
     zpe_config()
@@ -3923,7 +4083,7 @@ if __name__ == "__main__":
               "El progreso ya registrado se conserva; vuelve a correr el script para continuar.")
         sys.exit(130)
     except Exception as e:
-        print_ascii_fail(str(e)[:200])
+        print(f"\n[✗] {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
