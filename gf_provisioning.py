@@ -2141,6 +2141,99 @@ def juniper_config():
     _print_green_banner("CONFIGURACION DEL JUNIPER COMPLETADA EXITOSAMENTE.")
     mark_step_completed("juniper_config", {"juniper_console_device": used_device})
 
+# Racks fuente: se empieza en LEGO_ZPE_FIRST_HOST y, si falla, se sigue con
+# la IP +1 (.137, .138, ...) hasta probar LEGO_ZPE_MAX_HOSTS racks.
+LEGO_ZPE_FIRST_HOST = "172.24.125.136"
+LEGO_ZPE_MAX_HOSTS = 10
+
+
+def _lego_zpe_source_hosts():
+    """IPs a probar en orden, sin pasar de .254 y sin incluir la IP de este
+    mismo rack."""
+    state = load_state()
+    own_ip = state.get("config", {}).get("ip_address")
+    prefix, first = LEGO_ZPE_FIRST_HOST.rsplit(".", 1)
+    hosts = []
+    for last in range(int(first), 255):
+        ip = f"{prefix}.{last}"
+        if ip == own_ip:
+            continue
+        hosts.append(ip)
+        if len(hosts) == LEGO_ZPE_MAX_HOSTS:
+            break
+    return hosts
+LEGO_ZPE_REL_PATH = "lego-infra/lego_setup/lego_zpe_console_server"
+
+
+def download_lego_zpe_console_server():
+    """Antes de zpe_config(): copia la carpeta
+    ~/lego-infra/lego_setup/lego_zpe_console_server desde el rack fuente
+    (primero .136 y, si falla, .137, .138... hasta LEGO_ZPE_MAX_HOSTS racks)
+    a la misma ruta en este rack. Se baja primero a
+    una carpeta temporal; si ya existia una version, se deja respaldada como
+    lego_zpe_console_server.bak (solo la ultima)."""
+    if is_step_completed("download_lego_zpe_console_server"):
+        print("[=] Paso 'download_lego_zpe_console_server' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Descarga de lego_zpe_console_server desde el rack fuente ---")
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    user_home = f"/home/{sudo_user}"
+    dest = os.path.join(user_home, LEGO_ZPE_REL_PATH)
+    parent = os.path.dirname(dest)
+    name = os.path.basename(dest)
+    tmp_dir = os.path.join(parent, f".{name}.download")
+    backup = f"{dest}.bak"
+
+    os.makedirs(parent, exist_ok=True)
+    downloaded = os.path.join(tmp_dir, name)
+    source = None
+    errors = []
+    hosts = _lego_zpe_source_hosts()
+    for host in hosts:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        os.makedirs(tmp_dir)
+        print(f"[*] Descargando ~/{LEGO_ZPE_REL_PATH} desde {host}...")
+        try:
+            # Ruta remota relativa al home de testusr en el rack fuente (= ~/...).
+            # 2 intentos por rack y timeout de conexion corto, para no
+            # quedarse esperando en un rack apagado antes de pasar al siguiente.
+            _retry_download(
+                lambda h=host: _scp_download_once("testusr", h, LEGO_ZPE_REL_PATH, tmp_dir,
+                                                  scp_opts="-o ConnectTimeout=10"),
+                f"SCP de {name} desde {host}",
+                max_retries=2, base_delay=5,
+            )
+        except RuntimeError as e:
+            errors.append(f"{host}: {e}")
+            print(f"[!] No se pudo descargar desde {host}. Probando el siguiente rack...")
+            continue
+        if os.path.isdir(downloaded) and os.listdir(downloaded):
+            source = host
+            break
+        errors.append(f"{host}: la carpeta llego vacia o no existe")
+        print(f"[!] En {host} la carpeta llego vacia o no existe. Probando el siguiente rack...")
+
+    if not source:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        print_ascii_fail(f"No se pudo descargar '{name}' de ningun rack fuente.")
+        raise RuntimeError(
+            f"No se pudo descargar ~/{LEGO_ZPE_REL_PATH} desde "
+            f"{hosts[0]} a {hosts[-1]} ({len(hosts)} racks):\n  " + "\n  ".join(errors)
+        )
+
+    if os.path.exists(dest):
+        shutil.rmtree(backup, ignore_errors=True)
+        os.rename(dest, backup)
+        print(f"[*] La version anterior quedo respaldada en {backup}.")
+    os.rename(downloaded, dest)
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    n_files = sum(len(files) for _, _, files in os.walk(dest))
+    print(f"[✓] {dest} listo ({n_files} archivos, copiados desde {source}).")
+    mark_step_completed("download_lego_zpe_console_server", {"lego_zpe_source_host": source})
+
+
 def zpe_config():
     if is_step_completed("zpe_config"):
         print("[=] Paso 'zpe_config' ya fue ejecutado previamente. Omitiendo...")
@@ -2312,8 +2405,8 @@ def zpe_config():
 
     _print_green_banner("CONFIGURACION DEL ZPE COMPLETADA EXITOSAMENTE.")
     
-def _scp_download_once(remote_user, remote_host, remote_path, destination="."):
-    cmd = f"scp -r {remote_user}@{remote_host}:{remote_path} {destination}"
+def _scp_download_once(remote_user, remote_host, remote_path, destination=".", scp_opts=""):
+    cmd = f"scp -r {scp_opts + ' ' if scp_opts else ''}{remote_user}@{remote_host}:{remote_path} {destination}"
     print(f"[CMD Interactive] {cmd}")
 
     child = _spawn_bash(cmd, encoding="utf-8", timeout=None)
@@ -3236,7 +3329,7 @@ def _tross_stage_download_imageset():
         while True:
             tftp_output = _run_tross_cmd_and_wait(
                 child, "tftp -g -r tross/imageset.tgz 10.0.0.254",
-                max_wait_seconds=240, poll_interval=5,
+                max_wait_seconds=600, poll_interval=5,
                 label="Descargando imageset.tgz por tftp"
             )
             is_mac_mismatch = any(m in tftp_output for m in MAC_MISMATCH_MARKERS)
@@ -4392,6 +4485,7 @@ def main():
     download_python_tools()
     end_config_reboot()
     juniper_config()
+    download_lego_zpe_console_server()
     zpe_config()
     vrmu_util_config()
     tross_capture_mac()
