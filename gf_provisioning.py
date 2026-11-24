@@ -1551,52 +1551,86 @@ def create_networkmanager_symlink():
 
     mark_step_completed("create_networkmanager_symlink")
 
-def network_plan():
-    if is_step_completed("network_plan"):
+# El playbook (Setup Test Network) y el resto del script esperan las
+# interfaces de prueba como ens4f0/ens4f1. En algunos racks el kernel las
+# nombra ens4f0np0/ens4f1np1; netplan las renombra por MAC (runbook).
+TEST_NIC_CANDIDATES = {
+    "ens4f0": ("ens4f0", "ens4f0np0"),
+    "ens4f1": ("ens4f1", "ens4f1np1"),
+}
+
+
+def _nic_mac(candidates):
+    """(nombre, MAC) de la primera interfaz de 'candidates' que exista."""
+    for name in candidates:
+        path = f"/sys/class/net/{name}/address"
+        try:
+            with open(path) as f:
+                return name, f.read().strip().lower()
+        except OSError:
+            continue
+    return None, None
+
+
+def _list_nics():
+    try:
+        return sorted(n for n in os.listdir("/sys/class/net") if n != "lo")
+    except OSError:
+        return []
+
+
+def ensure_test_interface():
+    """ANTES de Ansible: el play 'Setup Test Network' corre
+    'nmcli dev show ens4f0' y falla con "Device 'ens4f0' not found" si la
+    interfaz tiene otro nombre. Si existe como ens4f0np0, se aplica el
+    netplan del runbook (network_plan) para renombrarla a ens4f0."""
+    if os.path.exists("/sys/class/net/ens4f0"):
+        print("[✓] La interfaz de prueba ens4f0 existe.")
+        return
+
+    actual, _ = _nic_mac(TEST_NIC_CANDIDATES["ens4f0"])
+    if not actual:
+        nics = ", ".join(_list_nics()) or "(ninguna)"
+        print_ascii_fail("No existe la interfaz de prueba ens4f0 (ni ens4f0np0).")
+        raise RuntimeError(
+            f"No se encontro la interfaz de prueba ens4f0 ni ens4f0np0. Interfaces en este "
+            f"equipo: {nics}. Revisa que la tarjeta de red de prueba este conectada y "
+            f"detectada antes de correr Ansible."
+        )
+
+    print(f"[*] La interfaz de prueba se llama '{actual}', pero el playbook espera 'ens4f0'. "
+          f"Renombrandola con netplan (como en el runbook)...")
+    network_plan(force=True)
+
+    for _ in range(15):
+        if os.path.exists("/sys/class/net/ens4f0"):
+            print("[✓] Interfaz renombrada a ens4f0.")
+            return
+        time.sleep(1)
+
+    print_ascii_fail("Netplan quedo configurado; falta reiniciar para que aplique ens4f0.")
+    raise RuntimeError(
+        f"Netplan ya renombra '{actual}' a 'ens4f0', pero el cambio no se aplico en caliente. "
+        f"Reinicia el equipo (sudo reboot) y vuelve a correr el script: continua desde aqui."
+    )
+
+
+def network_plan(force=False):
+    if is_step_completed("network_plan") and not force:
         print("[=] Paso 'network_plan' ya fue ejecutado previamente. Omitiendo...")
         return
 
     print("--- PASO 12: Configure Netplan for ens4f0 & ens4f1 ---")
 
-    mac_f0 = None
-    mac_f1 = None
-
-    try:
-        path_f0 = '/sys/class/net/ens4f0/address'
-        path_f1 = '/sys/class/net/ens4f1/address'
-        
-        if os.path.exists(path_f0):
-            with open(path_f0, 'r') as f:
-                mac_f0 = f.read().strip().lower()
-        if os.path.exists(path_f1):
-            with open(path_f1, 'r') as f:
-                mac_f1 = f.read().strip().lower()
-    except Exception as e:
-        print(f"[!] Warning leyendo sysfs: {e}")
-
-    if not mac_f0 or not mac_f1:
-        raw_output = run_command("ifconfig", check=False)
-        
-        if isinstance(raw_output, (tuple, list)):
-            ifconfig_str = str(raw_output[0])
-        elif isinstance(raw_output, bytes):
-            ifconfig_str = raw_output.decode('utf-8', errors='ignore')
-        else:
-            ifconfig_str = str(raw_output)
-
-        if not mac_f0:
-            f0_match = re.search(r'ens4f0:.*?\bether\s+([0-9a-fA-F:]{17})', ifconfig_str, re.DOTALL)
-            if f0_match:
-                mac_f0 = f0_match.group(1).lower()
-
-        if not mac_f1:
-            f1_match = re.search(r'ens4f1:.*?\bether\s+([0-9a-fA-F:]{17})', ifconfig_str, re.DOTALL)
-            if f1_match:
-                mac_f1 = f1_match.group(1).lower()
+    name_f0, mac_f0 = _nic_mac(TEST_NIC_CANDIDATES["ens4f0"])
+    name_f1, mac_f1 = _nic_mac(TEST_NIC_CANDIDATES["ens4f1"])
 
     if not mac_f0 or not mac_f1:
         print_ascii_fail()
-        raise RuntimeError(f"No se pudieron obtener las direcciones MAC (ens4f0: {mac_f0}, ens4f1: {mac_f1})")
+        raise RuntimeError(
+            f"No se pudieron obtener las direcciones MAC (ens4f0: {mac_f0}, ens4f1: {mac_f1}). "
+            f"Interfaces en este equipo: {', '.join(_list_nics()) or '(ninguna)'}."
+        )
 
     print(f"[+] MAC ens4f0: {mac_f0}")
     print(f"[+] MAC ens4f1: {mac_f1}")
@@ -4030,7 +4064,10 @@ def _installed_pkg_version(pkg):
     if res.returncode != 0 or "|" not in res.stdout:
         return None
     status, version = res.stdout.split("|", 1)
-    return version.strip() if status.strip() == "install ok installed" else None
+    # El 3er campo es el estado real ('installed'); el 1ro puede ser
+    # 'install' o 'hold' (tras 'apt-mark hold'), y ambos estan instalados.
+    fields = status.split()
+    return version.strip() if len(fields) == 3 and fields[2] == "installed" else None
 
 
 def _apt_candidate_versions(pkg):
@@ -4082,6 +4119,23 @@ def _ensure_crd_repo():
     run_interactive(f'echo "{CRD_REPO_LINE}" | sudo tee {CRD_LIST_FILE}')
 
 
+def _dedupe_crd_sources():
+    """El paquete chrome-remote-desktop crea su propio
+    google-chrome-remote-desktop.list. Si existe, se borra el que agrega
+    este script (CRD_LIST_FILE) para que apt no avise que el repo esta
+    'configured multiple times'."""
+    if not os.path.exists(CRD_LIST_FILE):
+        return
+    others = subprocess.run(
+        "grep -ls 'chrome-remote-desktop/deb' /etc/apt/sources.list.d/*.list",
+        shell=True, capture_output=True, text=True,
+    ).stdout.split()
+    if any(o != CRD_LIST_FILE for o in others):
+        print(f"[*] Quitando {CRD_LIST_FILE}: el repo de Chrome Remote Desktop ya esta en "
+              f"{', '.join(o for o in others if o != CRD_LIST_FILE)}.")
+        run_command(f"sudo rm -f {CRD_LIST_FILE}", check=False)
+
+
 def _print_playbook_crd_task():
     """Deja en el log como define el playbook la tarea de Chrome/CRD, para
     poder diagnosticar si vuelve a fallar en Ansible."""
@@ -4121,6 +4175,7 @@ def fix_chrome_remote_desktop():
 
     print("--- PASO: Instalacion manual de Google Chrome y Chrome Remote Desktop ---")
 
+    _dedupe_crd_sources()
     installed = _installed_pkg_version(CRD_PACKAGE)
     if installed:
         print(f"[=] {CRD_PACKAGE} ya esta instalado (version {installed}).")
@@ -4160,6 +4215,7 @@ def fix_chrome_remote_desktop():
 
     print(f"[*] Congelando {CRD_PACKAGE} {installed} (apt-mark hold)...")
     run_interactive(f"sudo apt-mark hold {CRD_PACKAGE}")
+    _dedupe_crd_sources()
 
     _print_playbook_crd_task()
     mark_step_completed("fix_chrome_remote_desktop", {"chrome_remote_desktop_version": installed})
@@ -4325,6 +4381,7 @@ def main():
     ensure_dhcp()
     fix_chrome()
     fix_chrome_remote_desktop()
+    ensure_test_interface()
     run_ansible_playbook()
     provisional_dhcp()
     network_plan()
