@@ -2457,6 +2457,7 @@ def ping_instruments():
     print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
     run_interactive("sudo systemctl restart isc-dhcp-server")
     run_interactive("sudo systemctl restart isc-dhcp-server6")
+    _green_wait(10, "Esperando tras reiniciar DHCP")
 
     failed = []
     for host in PING_INSTRUMENTS_HOSTS:
