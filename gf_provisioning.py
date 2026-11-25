@@ -2356,17 +2356,26 @@ def zpe_config():
     run_interactive("sudo systemctl restart isc-dhcp-server")
     run_interactive("sudo systemctl restart isc-dhcp-server6")
 
-    # Si ya estaba configurado previamente, omitimos únicamente el script masivo de puertos por SSH
     if already_configured:
         _print_green_banner(
-            "EL ZPE YA ESTABA CONFIGURADO. Se extrajo la MAC y se actualizó el DHCP, "
-            "omitiendo la ejecución del script de configuración de puertos por SSH."
+            "EL ZPE YA ESTABA CONFIGURADO. Se extrajo la MAC y se actualizó el DHCP."
         )
         return
 
-    # --- PASO G: Ejecutar script de configuracion de todos los puertos del ZPE via SSH ---
+    _print_green_banner("CONFIGURACION DEL ZPE COMPLETADA EXITOSAMENTE.")
+
+
+def lego_config_zpe_allports():
+    """Despues de zpe_config(): configura todos los puertos del ZPE corriendo
+    lego_config_zpe_allports.sh por SSH contra admin@10.0.0.253, desde
+    ~/lego-infra/lego_setup/lego_zpe_console_server."""
+    if is_step_completed("lego_config_zpe_allports"):
+        print("[=] Paso 'lego_config_zpe_allports' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Configuracion de todos los puertos del ZPE (lego_config_zpe_allports.sh) ---")
     sudo_user = os.environ.get('SUDO_USER', 'testusr')
-    zpe_script_dir = f"/home/{sudo_user}/lego-infra/lego_setup/lego_zpe_console_server"
+    zpe_script_dir = f"/home/{sudo_user}/{LEGO_ZPE_REL_PATH}"
     ssh_cmd = (
         f"cd {zpe_script_dir} && "
         "ssh -t -t -v -o ConnectTimeout=10 admin@10.0.0.253 < lego_config_zpe_allports.sh"
@@ -2403,7 +2412,8 @@ def zpe_config():
             f"Error ejecutando lego_config_zpe_allports.sh via SSH (Exit code: {ssh_child.exitstatus})"
         )
 
-    _print_green_banner("CONFIGURACION DEL ZPE COMPLETADA EXITOSAMENTE.")
+    mark_step_completed("lego_config_zpe_allports")
+    _print_green_banner("CONFIGURACION DE PUERTOS DEL ZPE (allports) COMPLETADA EXITOSAMENTE.")
     
 def _scp_download_once(remote_user, remote_host, remote_path, destination=".", scp_opts=""):
     cmd = f"scp -r {scp_opts + ' ' if scp_opts else ''}{remote_user}@{remote_host}:{remote_path} {destination}"
@@ -3325,6 +3335,8 @@ def _tross_stage_download_imageset():
 
         MAC_MISMATCH_MARKERS = ("server write failed", "Network is unreachable")
         TRANSIENT_FAILURE_MARKERS = ("Retry limit exceeded", "server read timed out")
+        TFTP_MAX_AUTO_RETRIES = 3
+        transient_retries = 0
 
         while True:
             tftp_output = _run_tross_cmd_and_wait(
@@ -3352,18 +3364,33 @@ def _tross_stage_download_imageset():
             if is_transient_failure:
                 # Timeout de red, no mismatch de MAC: probablemente
                 # transitorio (se ha visto acompañado de un corte breve del
-                # link durante la espera).
+                # link durante la espera). Se reintenta solo hasta
+                # TFTP_MAX_AUTO_RETRIES veces; si sigue fallando se alerta al
+                # operador y se espera su ENTER.
+                if transient_retries < TFTP_MAX_AUTO_RETRIES:
+                    transient_retries += 1
+                    print(
+                        f"[!] La descarga de imageset.tgz por TFTP fallo por timeout. "
+                        f"Reintento automatico {transient_retries}/{TFTP_MAX_AUTO_RETRIES} en 10s..."
+                    )
+                    time.sleep(10)
+                    continue
+                sys.stdout.write("\a")  # campana de la terminal
+                sys.stdout.flush()
                 _print_red_banner(
-                    "La descarga de imageset.tgz por TFTP fallo por timeout "
+                    f"ALERTA: La descarga de imageset.tgz por TFTP fallo por timeout "
+                    f"{TFTP_MAX_AUTO_RETRIES + 1} veces seguidas "
                     "('Retry limit exceeded' / 'server read timed out'), no por "
-                    "mismatch de MAC. Puede deberse a un corte momentaneo de red.\n"
+                    "mismatch de MAC.\n"
                     "\n"
-                    "Verifique la conectividad de red hacia 10.0.0.254 si el problema "
-                    "persiste tras varios reintentos.\n"
+                    "Verifique la conectividad de red hacia 10.0.0.254 (cable, link, "
+                    "servicio tftp) antes de continuar.\n"
                     "\n"
-                    "Presione ENTER para reintentar la descarga."
+                    f"Presione ENTER para reintentar la descarga "
+                    f"(se haran otros {TFTP_MAX_AUTO_RETRIES} reintentos automaticos)."
                 )
                 input("Presione ENTER para continuar...")
+                transient_retries = 0
                 continue
             print("[✓] Descarga de imageset.tgz completada sin errores de red.")
             break
@@ -4487,6 +4514,7 @@ def main():
     juniper_config()
     download_lego_zpe_console_server()
     zpe_config()
+    lego_config_zpe_allports()
     vrmu_util_config()
     tross_capture_mac()
     TROSS_CONFIG()
