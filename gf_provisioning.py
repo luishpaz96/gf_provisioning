@@ -2400,26 +2400,40 @@ def lego_config_zpe_allports():
     ssh_child = _spawn_bash(ssh_cmd, encoding="utf-8", timeout=600)
     ssh_child.logfile_read = sys.stdout
 
-    idx = ssh_child.expect([
-        r"\(admin@10\.0\.0\.253\)\s*Password:",
-        pexpect.EOF,
-        pexpect.TIMEOUT
-    ], timeout=60)
+    # Se atiende el prompt '(admin@10.0.0.253) Password:' cada vez que
+    # aparezca (enviando 'admin'), y la confirmacion de host key si sale,
+    # hasta que la sesion SSH termine (EOF).
+    password_prompts = 0
+    deadline = time.time() + 600
+    while True:
+        remaining = max(1, int(deadline - time.time()))
+        idx = ssh_child.expect([
+            r"\(admin@10\.0\.0\.253\)\s*[Pp]assword:",
+            r"admin@10\.0\.0\.253's [Pp]assword:",
+            r"Are you sure you want to continue connecting",
+            pexpect.EOF,
+            pexpect.TIMEOUT
+        ], timeout=remaining)
 
-    if idx == 0:
-        print("[*] Prompt de password SSH detectado. Enviando password 'admin'...")
-        ssh_child.sendline("admin")
-        idx2 = ssh_child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=540)
-        if idx2 != 0:
+        if idx in (0, 1):
+            password_prompts += 1
+            if password_prompts > 3:
+                print_ascii_fail("El ZPE rechazo el password 'admin' 3 veces.")
+                ssh_child.close(force=True)
+                raise RuntimeError("El ZPE (10.0.0.253) rechazo el password 'admin' por SSH.")
+            print("\n[*] Prompt '(admin@10.0.0.253) Password:' detectado. Enviando password 'admin'...")
+            ssh_child.sendline("admin")
+        elif idx == 2:
+            print("\n[*] Confirmando host key del ZPE (yes)...")
+            ssh_child.sendline("yes")
+        elif idx == 3:
+            if password_prompts == 0:
+                print("[=] La sesion SSH finalizo sin solicitar password (posible autenticacion por llave).")
+            break
+        else:
             print_ascii_fail()
             ssh_child.close(force=True)
-            raise RuntimeError("Timeout esperando que finalice lego_config_zpe_allports.sh via SSH.")
-    elif idx == 1:
-        print("[=] La sesion SSH finalizo sin solicitar password (posible autenticacion por llave).")
-    else:
-        print_ascii_fail()
-        ssh_child.close(force=True)
-        raise RuntimeError("Timeout esperando el prompt de password SSH hacia el ZPE (10.0.0.253).")
+            raise RuntimeError("Timeout esperando que finalice lego_config_zpe_allports.sh via SSH (10.0.0.253).")
 
     ssh_child.close()
     if ssh_child.exitstatus not in (0, None):
