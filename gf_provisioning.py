@@ -2431,6 +2431,64 @@ def lego_config_zpe_allports():
     mark_step_completed("lego_config_zpe_allports")
     _print_green_banner("CONFIGURACION DE PUERTOS DEL ZPE (allports) COMPLETADA EXITOSAMENTE.")
     
+PING_INSTRUMENTS_HOSTS = ("10.0.0.254", "10.0.0.253")
+PING_INSTRUMENTS_MAX_RETRIES = 3
+
+
+def _ping_once(host):
+    """Un ping (3 paquetes, 2s de espera por respuesta). True si responde."""
+    cmd = ["ping", "-c", "3", "-W", "2", host]
+    print(f"[CMD] {' '.join(cmd)}")
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    print(result.stdout)
+    return result.returncode == 0
+
+
+def ping_instruments():
+    """Al terminar la configuracion del ZPE: reinicia los servicios DHCP y
+    valida que 10.0.0.254 y luego 10.0.0.253 respondan a ping. Cada host se
+    reintenta hasta PING_INSTRUMENTS_MAX_RETRIES veces; si no responde se
+    muestra una alerta de falla."""
+    if is_step_completed("ping_instruments"):
+        print("[=] Paso 'ping_instruments' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: Ping a instrumentos (10.0.0.254 y 10.0.0.253) ---")
+    print("[*] Reiniciando servicios DHCP (IPv4 e IPv6)...")
+    run_interactive("sudo systemctl restart isc-dhcp-server")
+    run_interactive("sudo systemctl restart isc-dhcp-server6")
+
+    failed = []
+    for host in PING_INSTRUMENTS_HOSTS:
+        print(f"[*] Validando respuesta de {host}...")
+        ok = _ping_once(host)
+        retries = 0
+        while not ok and retries < PING_INSTRUMENTS_MAX_RETRIES:
+            retries += 1
+            print(f"[!] {host} no respondio. Reintento {retries}/{PING_INSTRUMENTS_MAX_RETRIES} en 10s...")
+            time.sleep(10)
+            ok = _ping_once(host)
+        if ok:
+            print(f"[✓] {host} responde a ping.")
+            continue
+        failed.append(host)
+        sys.stdout.write("\a")  # campana de la terminal
+        sys.stdout.flush()
+        _print_red_banner(
+            f"ALERTA: {host} NO responde a ping despues de "
+            f"{PING_INSTRUMENTS_MAX_RETRIES} reintentos.\n"
+            "\n"
+            "Verifique cableado, alimentacion del equipo y la configuracion DHCP."
+        )
+
+    if failed:
+        print_ascii_fail(f"Ping a instrumentos fallo: {', '.join(failed)}")
+        raise RuntimeError(f"Sin respuesta de ping de: {', '.join(failed)}")
+
+    mark_step_completed("ping_instruments")
+    _print_green_banner("PING A INSTRUMENTOS (10.0.0.254 y 10.0.0.253) EXITOSO.")
+
+
 def _scp_download_once(remote_user, remote_host, remote_path, destination=".", scp_opts=""):
     cmd = f"scp -r {scp_opts + ' ' if scp_opts else ''}{remote_user}@{remote_host}:{remote_path} {destination}"
     print(f"[CMD Interactive] {cmd}")
@@ -4531,6 +4589,7 @@ def main():
     download_lego_zpe_console_server()
     zpe_config()
     lego_config_zpe_allports()
+    ping_instruments()
     vrmu_util_config()
     tross_capture_mac()
     TROSS_CONFIG()
