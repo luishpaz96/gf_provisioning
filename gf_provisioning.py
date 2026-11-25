@@ -1898,6 +1898,9 @@ def _juniper_expect_or_fail(child, patterns, timeout, error_msg):
         raise RuntimeError(error_msg)
     return idx
 
+JUNOS_EXPECTED_BANNER = "--- JUNOS 20.2R2.11 Kernel 64-bit FLEX"
+
+
 def juniper_config():
     if is_step_completed("juniper_config"):
         print("[=] Paso 'juniper_config' ya fue ejecutado previamente. Omitiendo...")
@@ -1928,53 +1931,66 @@ def juniper_config():
             error_msg="No se detecto el prompt 'login:' del Juniper tras conectar por consola."
         )
 
-        if idx == 0:
-            print("[*] Prompt 'login:' detectado. Ingresando usuario 'root'...")
-            child.sendline("root")
-
-            # --- Verificar si el Juniper pide password tras el usuario 'root' ---
-            # Si aparece 'Password:', significa que el equipo ya tiene una
-            # contrasena de root configurada, es decir, ya fue provisionado
-            # previamente: se omite el resto de la configuracion.
-            print("[*] Validando version de JUNOS...")
-            idx_auth = child.expect([
-                r"Password:",
-                r"JUNOS 20\.2R2\.11 Kernel 64-bit FLEX JNPR-11\.0",
-                pexpect.TIMEOUT,
-                pexpect.EOF
-            ], timeout=20)
-
-            if idx_auth == 0:
-                print("[=] El Juniper solicito 'Password:' tras ingresar 'root': "
-                      "esto indica que ya se encuentra configurado.")
-                _minicom_exit(child)
-                _print_green_banner(
-                    "EL JUNIPER YA ESTABA CONFIGURADO. Se omite el resto de los "
-                    "pasos de configuracion automatica para este equipo."
-                )
-                mark_step_completed(
-                    "juniper_config",
-                    {"juniper_console_device": used_device, "juniper_already_configured": True}
-                )
-                return
-            elif idx_auth in (2, 3):
+        if idx != 0:
+            # La sesion ya estaba autenticada: el banner de version solo se
+            # imprime al hacer login, asi que se cierra la sesion (saliendo
+            # del CLI/configure si hiciera falta) para volver a 'login:'.
+            print("[=] La sesion ya se encontraba autenticada en el Juniper. "
+                  "Cerrando sesion para validar la version de JUNOS en el login...")
+            for _ in range(4):
+                child.sendline("exit")
+                idx_exit = child.expect([r"login:", r"\(yes\)", pexpect.TIMEOUT, pexpect.EOF], timeout=10)
+                if idx_exit == 1:
+                    # 'Exit with uncommitted changes? [yes,no] (yes)'
+                    child.sendline("yes")
+                    idx_exit = child.expect([r"login:", pexpect.TIMEOUT, pexpect.EOF], timeout=10)
+                    idx_exit = 0 if idx_exit == 0 else 2
+                if idx_exit == 0:
+                    break
+            else:
                 print_ascii_fail()
-                raise RuntimeError(
-                    "No se detecto ni el prompt 'Password:' ni la version esperada de "
-                    "JUNOS tras ingresar el usuario 'root'."
-                )
-            # idx_auth == 1: version de JUNOS detectada directamente, se continua abajo.
-        else:
-            print("[=] La sesion ya se encontraba autenticada en el Juniper.")
+                raise RuntimeError("No se pudo regresar al prompt 'login:' del Juniper para validar la version de JUNOS.")
 
-            # --- PASO C: Validar version de JUNOS ---
-            print("[*] Validando version de JUNOS...")
-            idx_auth = child.expect([
-                r"JUNOS 20\.2R2\.11 Kernel 64-bit FLEX JNPR-11\.0",
-                pexpect.TIMEOUT,
-                pexpect.EOF
-            ], timeout=20)
-            idx_auth = 1 if idx_auth == 0 else idx_auth + 1  # normalizar al mismo indice que la rama de arriba
+        print("[*] Prompt 'login:' detectado. Ingresando usuario 'root'...")
+        child.sendline("root")
+
+        # --- Verificar si el Juniper pide password tras el usuario 'root' ---
+        # Si aparece 'Password:', significa que el equipo ya tiene una
+        # contrasena de root configurada, es decir, ya fue provisionado
+        # previamente: se omite el resto de la configuracion.
+        # --- PASO C: Validar version de JUNOS en el banner del login ---
+        # Debe aparecer exactamente '--- JUNOS 20.2R2.11 Kernel 64-bit FLEX'.
+        # Cualquier otro banner, o llegar al prompt sin banner, es version
+        # incorrecta y lleva a la alerta de downgrade.
+        print("[*] Validando version de JUNOS...")
+        idx_login = child.expect([
+            r"Password:",
+            r"---\s*JUNOS[^\r\n]*[\r\n]",
+            r"root@[^\r\n]*%",
+            pexpect.TIMEOUT,
+            pexpect.EOF
+        ], timeout=20)
+
+        if idx_login == 0:
+            print("[=] El Juniper solicito 'Password:' tras ingresar 'root': "
+                  "esto indica que ya se encuentra configurado.")
+            _minicom_exit(child)
+            _print_green_banner(
+                "EL JUNIPER YA ESTABA CONFIGURADO. Se omite el resto de los "
+                "pasos de configuracion automatica para este equipo."
+            )
+            mark_step_completed(
+                "juniper_config",
+                {"juniper_console_device": used_device, "juniper_already_configured": True}
+            )
+            return
+
+        banner = child.after.strip() if idx_login == 1 and isinstance(child.after, str) else ""
+        if banner:
+            print(f"\n[*] Banner de JUNOS detectado: {banner}")
+        else:
+            print("\n[!] No se detecto el banner '--- JUNOS ...' tras ingresar el usuario 'root'.")
+        idx_auth = 1 if JUNOS_EXPECTED_BANNER in banner else 0
 
         if idx_auth != 1:
             # --- Version incorrecta: instruir downgrade manual y cerrar el programa ---
