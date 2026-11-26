@@ -4561,6 +4561,221 @@ def end_config_reboot():
     print("[*] Cerrando el log de ejecucion...")
     log_final_summary()
 
+# ==============================================================================
+# PASO FINAL: dhcpd.conf / dhcpd6.conf con las MACs de Izumis, ZPE y Tross
+# ==============================================================================
+IZUMI_MAX_HOSTS = 16
+IBOOT_MAC = "00:0D:AD:04:92:28"
+
+
+def _normalize_mac(raw):
+    """'9898FBCADAB2', '98-98-fb-ca-da-b2' o '98:98:FB:CA:DA:B2' ->
+    '98:98:FB:CA:DA:B2'. Devuelve None si no es una MAC valida."""
+    clean = re.sub(r"[^0-9A-Fa-f]", "", raw or "").upper()
+    if len(clean) != 12:
+        return None
+    return ":".join(clean[i:i + 2] for i in range(0, 12, 2))
+
+
+def _resolve_izumi_mac_file(name):
+    """Busca el archivo con el nombre dado en el directorio actual, en el
+    home del usuario y junto a este script."""
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    candidates = [name,
+                  os.path.join(f"/home/{sudo_user}", name),
+                  os.path.join(os.path.dirname(os.path.abspath(__file__)), name)]
+    for path in candidates:
+        if os.path.isfile(os.path.expanduser(path)):
+            return os.path.abspath(os.path.expanduser(path))
+    return None
+
+
+def _read_izumi_macs(path):
+    """Lee las MACs de las Izumis (una por linea). Si el archivo trae bloques
+    'zpe'/'tross' (formato de dhcpd.py) se devuelven aparte, para usarlos
+    solo si el estado no tiene esas MACs."""
+    with open(path, "r", encoding="utf-8") as f:
+        lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
+
+    izumi, extra, invalid = [], {}, []
+    i = 0
+    while i < len(lines):
+        label = lines[i].lower()
+        if label in ("zpe", "tross") and i + 1 < len(lines):
+            extra[label] = _normalize_mac(lines[i + 1])
+            i += 2
+            continue
+        mac = _normalize_mac(lines[i])
+        (izumi if mac else invalid).append(mac or lines[i])
+        i += 1
+    return izumi, extra, invalid
+
+
+def _build_dhcpd_conf(izumi_macs, zpe_mac, tross_mac):
+    """dhcpd.conf (IPv4). Las Izumis llevan +3 hex en el ultimo octeto."""
+    hosts = [
+        f"host izumi-{idx} {{ hardware ethernet {_mac_plus_offset(mac, 3).upper()}; "
+        f"fixed-address 10.0.0.{idx}; }}"
+        for idx, mac in enumerate(izumi_macs, start=1)
+    ]
+    hosts.append("host rj45-switch { hardware ethernet 00:00:00:00:00:00; fixed-address 10.0.0.249; }")
+
+    return (
+        "# BEGIN ANSIBLE MANAGED BLOCK\n"
+        "ddns-update-style none;\n"
+        "ignore client-updates;\n"
+        "allow booting;\n"
+        "allow bootp;\n"
+        "ddns-updates off;\n"
+        "default-lease-time 6000;\n"
+        "max-lease-time 7200;\n"
+        "authoritative;\n"
+        "subnet 10.0.0.0 netmask 255.255.0.0 {\n"
+        "  option subnet-mask 255.255.0.0;\n"
+        "  option routers 10.0.0.254;\n"
+        "  option broadcast-address 10.0.255.255;\n"
+        "  next-server 10.0.0.254;\n"
+        "\n"
+        "  # use the http link for ovss image\n"
+        "  # filename \"http://10.0.0.254:8001/izumi/ipxe.cfg\";\n"
+        "\n"
+        "  # use the pxelinux loader for nodeOs image using tftp\n"
+        "  # filename \"pxelinux.0\";\n"
+        "\n"
+        "  # use pxelinux loader for nodeOs image using httpfileserverd\n"
+        "  filename \"http://10.0.0.254:8001/pxelinux.0\";\n"
+        "}\n"
+        + "\n".join(hosts) + "\n"
+        "\n"
+        "# NOTE #\n"
+        "# *** DO NOT PUT MANUAL ENTRIES INSIDE THIS ANSIBLE BLOCK!!! ***\n"
+        "# All manual entries should be outside the block to be preserved!\n"
+        "# END ANSIBLE MANAGED BLOCK\n"
+        f"host zpe {{ hardware ethernet {zpe_mac}; fixed-address 10.0.0.253; }}\n"
+        f"host iboot {{ hardware ethernet {IBOOT_MAC}; fixed-address 10.0.0.250; }}\n"
+        f"host tross {{ hardware ethernet {tross_mac}; fixed-address 10.0.0.251; }}\n"
+    )
+
+
+def _build_dhcpd6_conf(izumi_macs):
+    """dhcpd6.conf (IPv6). client-id con la MAC SIN modificar."""
+    hosts = []
+    for idx, mac in enumerate(izumi_macs, start=1):
+        hosts.append(
+            f"host diorite-{idx} {{\n"
+            f"host-identifier option dhcp6.client-id 00:03:00:01:{mac};\n"
+            f"log(info, \"DHCPv6 - Found Diorite-{idx} client...\");\n"
+            f"fixed-address6 fd00::{9 + idx:X};\n"
+            "}"
+        )
+    return (
+        "# BEGIN ANSIBLE MANAGED BLOCK\n"
+        "ddns-update-style none;\n"
+        "ignore client-updates;\n"
+        "allow booting;\n"
+        "allow bootp;\n"
+        "ddns-updates off;\n"
+        "default-lease-time 6000;\n"
+        "max-lease-time 7200;\n"
+        "authoritative;\n"
+        "option domain-search-list code 119 = text;\n"
+        "option dhcp6.bootfile-url code 59 = string;\n"
+        "option dhcp6.name-servers fd00::9;\n"
+        "\n"
+        "subnet6 fd00::/64 {\n"
+        "range6 fd00::11 fd00::FF;\n"
+        "option dhcp6.bootfile-url \"http://[fd00::9]:8001/diorite/ipxe.cfg\";\n"
+        "log(info, \"DHCPv6 - Found other ipv6 client...\");\n"
+        "\n"
+        "# To assign a fixed address to diorite.\n"
+        + "\n".join(hosts) +
+        "\n}\n# END ANSIBLE MANAGED BLOCK\n"
+    )
+
+
+def izumi_dhcp_config():
+    """Paso final: genera dhcpd.conf y dhcpd6.conf con las MACs de las
+    Izumis (leidas de un archivo cuyo nombre da el operador) y las del ZPE
+    y el Tross ya obtenidas en pasos anteriores (zpe_config y
+    tross_capture_mac), los mueve a /etc/dhcp/ y reinicia
+    isc-dhcp-server e isc-dhcp-server6."""
+    if is_step_completed("izumi_dhcp_config"):
+        print("[=] Paso 'izumi_dhcp_config' ya fue ejecutado previamente. Omitiendo...")
+        return
+
+    print("--- PASO: dhcpd.conf / dhcpd6.conf con MACs de Izumis, ZPE y Tross ---")
+
+    config = load_state().get("config", {})
+    zpe_mac = _normalize_mac(config.get("zpe_mac"))
+    tross_mac = _normalize_mac(config.get("tross_mac"))
+
+    # 1) Archivo con las MACs de las Izumis
+    while True:
+        name = input("Nombre del archivo con las MACs de las Izumis: ").strip()
+        if not name:
+            continue
+        path = _resolve_izumi_mac_file(name)
+        if path:
+            break
+        print(f"[!] No se encontro '{name}' (se busco en el directorio actual, en el home "
+              f"y junto al script). Intenta de nuevo.")
+
+    izumi_macs, extra, invalid = _read_izumi_macs(path)
+    print(f"[*] Archivo: {path}")
+    for bad in invalid:
+        print(f"[!] Linea ignorada (no es una MAC valida): {bad}")
+    if not izumi_macs:
+        print_ascii_fail("El archivo no tiene MACs de Izumis validas.")
+        raise RuntimeError(f"No se encontraron MACs de Izumis validas en {path}.")
+    if len(izumi_macs) > IZUMI_MAX_HOSTS:
+        print(f"[!] El archivo trae {len(izumi_macs)} MACs; solo se usan las primeras "
+              f"{IZUMI_MAX_HOSTS}.")
+        izumi_macs = izumi_macs[:IZUMI_MAX_HOSTS]
+
+    # 2) MACs del ZPE y del Tross (del estado; el archivo solo como respaldo)
+    zpe_mac = zpe_mac or extra.get("zpe")
+    tross_mac = tross_mac or extra.get("tross")
+    missing = [n for n, m in (("ZPE (zpe_config)", zpe_mac),
+                              ("Tross (tross_capture_mac)", tross_mac)) if not m]
+    if missing:
+        print_ascii_fail("Faltan MACs para generar dhcpd.conf.")
+        raise RuntimeError(f"No se encontro la MAC de: {', '.join(missing)}. Corre esos pasos "
+                           f"antes o agrega 'zpe'/'tross' y su MAC al archivo de Izumis.")
+
+    print(f"[+] MAC ZPE:   {zpe_mac}")
+    print(f"[+] MAC Tross: {tross_mac}")
+    for idx, mac in enumerate(izumi_macs, start=1):
+        print(f"[+] Izumi-{idx}: {mac} (dhcpd.conf: {_mac_plus_offset(mac, 3).upper()})")
+
+    # 3) Generar los archivos en el home y moverlos a /etc/dhcp/
+    sudo_user = os.environ.get('SUDO_USER', 'testusr')
+    home_dir = f"/home/{sudo_user}"
+    files = {
+        "dhcpd.conf": _build_dhcpd_conf(izumi_macs, zpe_mac, tross_mac),
+        "dhcpd6.conf": _build_dhcpd6_conf(izumi_macs),
+    }
+    _activate_sudo()
+    for name, content in files.items():
+        local = os.path.join(home_dir, name)
+        with open(local, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"[✓] {local} generado.")
+        dest = f"/etc/dhcp/{name}"
+        if os.path.exists(dest):
+            run_command(f"sudo cp -p {dest} {dest}.bak")
+            print(f"[*] Respaldo del anterior: {dest}.bak")
+        run_command(f"sudo mv {local} {dest}")
+        print(f"[✓] {name} movido a {dest}.")
+
+    # 4) Reiniciar isc-dhcp-server e isc-dhcp-server6
+    _restart_dhcp_services(fatal=True)
+
+    mark_step_completed("izumi_dhcp_config", {
+        "izumi_mac_file": path,
+        "izumi_macs": izumi_macs,
+    })
+
+
 def main():
     # 1) Credenciales (solo se piden la primera vez) y sudo activado
     #    automaticamente, antes de cualquier otro paso.
@@ -4608,6 +4823,7 @@ def main():
     vrmu_util_config()
     tross_capture_mac()
     TROSS_CONFIG()
+    izumi_dhcp_config()
 
 
 if __name__ == "__main__":
