@@ -18,7 +18,31 @@ import collections
 # CONFIGURACIÓN DE LOGGING Y TIEMPO TRASCURRIDO
 # ==============================================================================
 START_TIME = time.time()
-LOG_FILE_PATH = f"provisioning_execution_{time.strftime('%Y%m%d_%H%M%S')}.log"
+# Los logs de cada corrida se guardan en la carpeta LOG_DIR (relativa al
+# directorio desde donde se corre el script, igual que provisioning_state.json).
+LOG_DIR = "provisioning_logs"
+
+def _prepare_log_dir():
+    """Crea LOG_DIR si no existe y devuelve la carpeta donde se escribira el
+    log. Si la carpeta quedo con otro dueno (p. ej. creada por root) se
+    intenta corregir con 'sudo -n chown'; si aun asi no se puede escribir,
+    se usa el directorio actual para no perder el log."""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+    except OSError:
+        pass
+    if os.path.isdir(LOG_DIR) and not os.access(LOG_DIR, os.W_OK):
+        sudo_user = os.environ.get('SUDO_USER', 'testusr')
+        subprocess.run(["sudo", "-n", "chown", f"{sudo_user}:{sudo_user}", LOG_DIR],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if os.path.isdir(LOG_DIR) and os.access(LOG_DIR, os.W_OK):
+        return LOG_DIR
+    return "."
+
+LOG_FILE_PATH = os.path.join(
+    _prepare_log_dir(),
+    f"provisioning_execution_{time.strftime('%Y%m%d_%H%M%S')}.log",
+)
 
 class DualLogger:
     """Duplica la salida estándar (stdout) y de error (stderr) hacia la terminal y un archivo de log."""
@@ -48,17 +72,45 @@ logger_instance = DualLogger(LOG_FILE_PATH)
 sys.stdout = logger_instance
 sys.stderr = logger_instance
 
+def _format_duration(total_seconds):
+    """Formatea segundos como 'Xh Ym Zs' / 'Ym Zs' / 'Zs'."""
+    total_seconds = int(total_seconds)
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours} h {minutes} min {seconds} s"
+    if minutes > 0:
+        return f"{minutes} min {seconds} s"
+    return f"{seconds} s"
+
+_final_summary_done = False
+
 def log_final_summary():
-    """Calcula el tiempo transcurrido y escribe el resumen final en el log antes de salir o reiniciar."""
+    """Calcula el tiempo transcurrido, lo acumula en provisioning_state.json y
+    escribe el resumen final en el log antes de salir o reiniciar. Es
+    idempotente: si ya se ejecuto (p. ej. antes del reboot), la llamada de
+    atexit no hace nada."""
+    global _final_summary_done
+    if _final_summary_done:
+        return
+    _final_summary_done = True
+
     elapsed_seconds = int(time.time() - START_TIME)
-    minutes, seconds = divmod(elapsed_seconds, 60)
-    time_str = f"{minutes} min {seconds} s" if minutes > 0 else f"{seconds} s"
+    total_seconds = record_total_elapsed_time()
 
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     summary = (
         f"\n======================================================================\n"
         f" [LOG CLOSED] Fecha: {timestamp}\n"
-        f" [LOG CLOSED] Tiempo total transcurrido: {time_str}\n"
+        f" [LOG CLOSED] Tiempo de esta corrida: {_format_duration(elapsed_seconds)}\n"
+    )
+    if total_seconds is not None:
+        summary += (
+            f" [LOG CLOSED] Tiempo total acumulado del provisioning: "
+            f"{_format_duration(total_seconds)}\n"
+        )
+    summary += (
+        f" [LOG CLOSED] Log guardado en: {LOG_FILE_PATH}\n"
         f"======================================================================\n"
     )
     print(summary)
@@ -184,8 +236,67 @@ def load_state():
     fix_state_file_permissions()
     return _load_json_state(STATE_FILE)
 
+# ------------------------------------------------------------------------------
+# TIEMPO TOTAL ACUMULADO (en STATE_FILE, bajo la llave "tiempo_total")
+# ------------------------------------------------------------------------------
+# El provisioning se reanuda en varias corridas (reboots, fallos, Ctrl+C), asi
+# que el tiempo total es la SUMA de todas las corridas. Al primer guardado de
+# esta corrida se lee el acumulado previo del disco (_elapsed_base) y, a partir
+# de ahi, CADA save_state() escribe base + tiempo de esta corrida. Asi el
+# conteo queda actualizado en cada paso completado (sobrevive a un reboot o a
+# un corte de luz) y no se pierde aunque alguna funcion guarde un dict de
+# estado leido antes.
+TOTAL_TIME_KEY = "tiempo_total"
+_elapsed_base = None  # (segundos acumulados antes de esta corrida, corridas previas)
+
+def _ensure_elapsed_base():
+    global _elapsed_base
+    if _elapsed_base is not None:
+        return
+    prev_seconds, prev_runs = 0, 0
+    if os.path.exists(STATE_FILE):
+        try:
+            prev = _load_json_state(STATE_FILE).get(TOTAL_TIME_KEY, {}) or {}
+            prev_seconds = int(prev.get("segundos", 0))
+            prev_runs = int(prev.get("corridas", 0))
+        except Exception as e:
+            print(f"[!] Advertencia: no se pudo leer el tiempo total previo de {STATE_FILE} ({e}). "
+                  f"Se cuenta desde cero.")
+    _elapsed_base = (prev_seconds, prev_runs)
+
+def _apply_total_elapsed(state):
+    """Escribe en 'state' el tiempo total acumulado (previo + esta corrida)."""
+    _ensure_elapsed_base()
+    prev_seconds, prev_runs = _elapsed_base
+    total = prev_seconds + int(time.time() - START_TIME)
+    state[TOTAL_TIME_KEY] = {
+        "segundos": total,
+        "legible": _format_duration(total),
+        "corridas": prev_runs + 1,
+        "ultima_actualizacion": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    return total
+
+def record_total_elapsed_time():
+    """Guarda el tiempo total acumulado en STATE_FILE y lo devuelve (en
+    segundos). Si STATE_FILE aun no existe (la corrida termino antes de
+    guardar nada) no lo crea y devuelve None."""
+    try:
+        fix_state_file_permissions()
+        if not os.path.exists(STATE_FILE):
+            return None
+        state = _load_json_state(STATE_FILE)
+        total = _apply_total_elapsed(state)
+        _atomic_write_json(STATE_FILE, state)
+        return total
+    except Exception as e:
+        print(f"[!] Advertencia: no se pudo guardar el tiempo total en {STATE_FILE} ({e}).")
+        return None
+
 def save_state(state):
     fix_state_file_permissions()
+    _ensure_elapsed_base()  # leer el acumulado previo ANTES de sobrescribir el archivo
+    _apply_total_elapsed(state)
     _atomic_write_json(STATE_FILE, state)
 
 def is_step_completed(step_name):
@@ -4552,6 +4663,12 @@ def end_config_reboot():
     # Se hace flush sin cerrar el log (sys.stdout sigue redirigido al
     # DualLogger); el cierre definitivo queda como ultimo paso, ya con el
     # reinicio en curso.
+    # El reboot puede matar el proceso antes de que corra atexit: se guarda
+    # aqui el tiempo total acumulado para no perder esta corrida.
+    total = record_total_elapsed_time()
+    if total is not None:
+        print(f"[*] Tiempo total acumulado guardado en {STATE_FILE}: {_format_duration(total)}")
+
     print("\n\n[*] Forzando el flush del log a disco (sin cerrarlo) antes del reboot...")
     _flush_log_to_disk()
 
